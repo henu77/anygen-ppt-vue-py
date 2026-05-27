@@ -1,0 +1,60 @@
+# ========================
+# Python
+# ========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+*.manifest
+*.spec
+.venv/
+venv/
+env/
+.env
+*.log
+logs/
+data/
+
+# ========================
+# Node.js / Vue / Vite
+# ========================
+node_modules/
+dist/
+.DS_Store
+*.local
+
+# build output
+dist-ssr/
+
+# env files
+.env.local
+.env.*.local
+
+# lock file (optional, uncomment if needed)
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
+
+# ========================
+# IDE / Editor
+# ========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+
+# ========================
+# OS
+# ========================
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
