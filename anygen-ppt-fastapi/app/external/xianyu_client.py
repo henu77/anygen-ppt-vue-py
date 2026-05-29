@@ -74,6 +74,9 @@ class XianyuClient:
         data: dict,
         cookies_str: str,
         type_: str = "originaljson",
+        extra_params: dict = None,
+        extra_headers: dict = None,
+        referer: str = "https://www.goofish.com/",
     ) -> dict:
         """发起 mtop API 请求（参照 xianyu-api/xianyu_utils.py MtopClient）"""
         timestamp = str(int(time.time() * 1000))
@@ -99,14 +102,18 @@ class XianyuClient:
             "api": api,
             "sessionOption": "AutoLoginOnly",
         }
+        if extra_params:
+            params.update(extra_params)
 
         headers = {
             "accept": "application/json",
             "content-type": "application/x-www-form-urlencoded",
             "cookie": cookies_str,
-            "referer": "https://www.goofish.com/",
+            "referer": referer,
             "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/138.0.0.0 Safari/537.36",
         }
+        if extra_headers:
+            headers.update(extra_headers)
 
         url = f"{self.H5API_BASE}/{api}/{version}/"
 
@@ -173,6 +180,113 @@ class XianyuClient:
                 return {"valid": False, "message": f"验证失败: {str(e)}"}
 
         return {"valid": False, "message": "Cookies 验证失败: 重试次数用尽"}
+
+    async def fetch_sold_orders(self, cookies_str: str, page: int = 1, page_size: int = 30) -> dict:
+        """获取卖家已卖出的订单列表"""
+        data = {
+            "pageNumber": page,
+            "rowsPerPage": page_size,
+            "orderIds": "",
+            "queryCode": "ALL",
+            "orderSearchParam": "{}",
+        }
+        try:
+            result = await self._mtop_request(
+                api="mtop.taobao.idle.trade.merchant.sold.get",
+                version="1.0",
+                data=data,
+                cookies_str=cookies_str,
+                type_="json",
+                extra_params={"type": "json", "valueType": "string"},
+                extra_headers={"idle_site_biz_code": "COMMONPRO"},
+                referer="https://seller.goofish.com/",
+            )
+            ret = result.get("ret", [])
+            if not any("SUCCESS" in r for r in ret):
+                return {"success": False, "error": ret[0] if ret else "未知错误", "items": []}
+
+            module = result.get("data", {}).get("module", {})
+            items = module.get("items", [])
+            next_page = module.get("nextPage", "false") == "true"
+            total_count = int(module.get("totalCount", "0"))
+
+            parsed = []
+            for item in items:
+                common = item.get("commonData", {})
+                buyer = item.get("buyerInfoVO", {})
+                price = item.get("priceVO", {})
+                parsed.append({
+                    "order_id": common.get("orderId", ""),
+                    "item_title": common.get("itemTitle", ""),
+                    "item_pic": common.get("itemPicUrl", ""),
+                    "order_status": common.get("orderStatus", ""),
+                    "create_time": common.get("createTime", ""),
+                    "total_amount": price.get("totalPrice", ""),
+                    "quantity": price.get("buyNum", "1"),
+                    "buyer_nick": buyer.get("buyerNick", ""),
+                    "buyer_id": buyer.get("buyerId", ""),
+                })
+
+            return {"success": True, "items": parsed, "total_count": total_count, "has_next": next_page}
+        except Exception as e:
+            logger.error(f"获取已卖出订单失败: {e}")
+            return {"success": False, "error": str(e), "items": []}
+
+    async def fetch_order_detail(self, cookies_str: str, order_id: str) -> dict:
+        """获取订单详情（含状态、收货地址、商品信息）"""
+        data = {"tid": order_id}
+        try:
+            result = await self._mtop_request(
+                api="mtop.idle.web.trade.order.detail",
+                version="1.0",
+                data=data,
+                cookies_str=cookies_str,
+                type_="originaljson",
+                extra_params={"spm_cnt": "a21ybx.order-detail.0.0"},
+                extra_headers={
+                    "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+                    "origin": "https://www.goofish.com",
+                },
+            )
+            ret = result.get("ret", [])
+            if not any("SUCCESS" in r for r in ret):
+                return {"success": False, "error": ret[0] if ret else "未知错误"}
+
+            components = result.get("data", {}).get("components", [])
+            detail = {"order_id": order_id}
+
+            for comp in components:
+                render = comp.get("render", "")
+                comp_data = comp.get("data", {})
+
+                if render == "orderInfoVO":
+                    item_info = comp_data.get("itemInfo", {})
+                    detail["item_title"] = item_info.get("title", "")
+                    detail["price"] = item_info.get("price", "")
+                    detail["buy_amount"] = item_info.get("buyAmount", 1)
+                    detail["sku_info"] = item_info.get("skuInfo", "")
+                    detail["item_pic"] = item_info.get("picUrl", "")
+                    detail["order_info_list"] = comp_data.get("orderInfoList", [])
+
+                elif render == "addressInfoVO":
+                    detail["receiver_name"] = comp_data.get("name", "")
+                    detail["phone_number"] = comp_data.get("phoneNumber", "")
+                    detail["address"] = comp_data.get("address", "")
+
+                elif render == "orderStatusVO":
+                    status_nodes = comp_data.get("orderStatusNodeList", [])
+                    detail["status_nodes"] = [
+                        {"title": n.get("title", ""), "completed": n.get("completed", False)}
+                        for n in status_nodes
+                    ]
+
+            detail["peer_user_id"] = result.get("data", {}).get("peerUserId", "")
+            detail["item_id"] = result.get("data", {}).get("itemId", "")
+
+            return {"success": True, "detail": detail}
+        except Exception as e:
+            logger.error(f"获取订单详情失败: {e}")
+            return {"success": False, "error": str(e)}
 
     async def confirm_delivery(self, order_no: str, cookies: str) -> bool:
         """确认发货"""

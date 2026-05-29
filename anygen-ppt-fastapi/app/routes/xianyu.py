@@ -161,6 +161,43 @@ async def unbind_account(
     return ok(message="解绑成功")
 
 
+@router.post("/xianyu-multi/relogin")
+async def relogin_account(
+    request: BindAccountRequest,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(verify_admin),
+):
+    """重新登录（更新已有账户的 Cookie）"""
+    account = XianyuService.get_account(db, request.accountId)
+    if not account:
+        raise HTTPException(status_code=404, detail="账户不存在")
+
+    account.cookies = request.cookies
+    account.status = "active"
+    if request.nickname:
+        account.nickname = request.nickname
+    db.commit()
+
+    # 重启该账户的续期任务（如果之前被禁用了）
+    try:
+        from app.services.scheduled_task import ScheduledTaskService
+        from app import scheduler as task_scheduler
+        task = ScheduledTaskService.get_task_by_type_and_config(db, "xianyu_cookie_renew", request.accountId)
+        if task and not task.enabled:
+            ScheduledTaskService.update_task(db, task.id, enabled=True)
+            task_scheduler.resume_job(task.id)
+    except Exception as e:
+        logger.warning(f"恢复续期任务失败: {e}")
+
+    logger.info(f"[{account.nickname or '-'}] 重新登录: {request.accountId}")
+    return ok(data={
+        "id": account.id,
+        "account_id": account.account_id,
+        "nickname": account.nickname,
+        "status": account.status,
+    })
+
+
 @router.post("/xianyu-multi/template")
 async def update_template(
     request: UpdateTemplateRequest,
@@ -183,6 +220,53 @@ async def update_template(
         "created_at": account.created_at.isoformat() if account.created_at else None,
         "updated_at": account.updated_at.isoformat() if account.updated_at else None,
     })
+
+
+@router.get("/xianyu/orders/sold")
+async def get_sold_orders(
+    accountId: str,
+    page: int = 1,
+    pageSize: int = 30,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(verify_admin),
+):
+    """从闲鱼API获取已卖出的订单列表"""
+    account = XianyuService.get_account(db, accountId)
+    if not account:
+        raise HTTPException(status_code=404, detail="账户不存在")
+    if not account.cookies:
+        raise HTTPException(status_code=400, detail="账户无Cookie")
+
+    result = await xianyu_client.fetch_sold_orders(account.cookies, page=page, page_size=pageSize)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "获取订单失败"))
+
+    return ok(data={
+        "items": result["items"],
+        "totalCount": result["total_count"],
+        "hasNext": result["has_next"],
+    })
+
+
+@router.get("/xianyu/orders/{order_id}/detail")
+async def get_order_detail(
+    order_id: str,
+    accountId: str,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(verify_admin),
+):
+    """从闲鱼API获取订单详情"""
+    account = XianyuService.get_account(db, accountId)
+    if not account:
+        raise HTTPException(status_code=404, detail="账户不存在")
+    if not account.cookies:
+        raise HTTPException(status_code=400, detail="账户无Cookie")
+
+    result = await xianyu_client.fetch_order_detail(account.cookies, order_id)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "获取订单详情失败"))
+
+    return ok(data=result["detail"])
 
 
 @router.get("/xianyu-multi/orders")

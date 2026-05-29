@@ -39,8 +39,22 @@ def migrate_db():
     except Exception as e:
         logger.warning(f"数据库迁移检查: {e}")
         db.rollback()
-    finally:
-        db.close()
+
+    # 设置默认发货模板（为空的账户）
+    try:
+        default_template = "您的卡密为：{key}\n\n自助导出网站：https://caimaapi.ccwu.cc"
+        result = db.execute(text("SELECT id, delivery_template FROM xianyu_accounts WHERE delivery_template IS NULL OR delivery_template = ''"))
+        rows = result.fetchall()
+        if rows:
+            for row in rows:
+                db.execute(text("UPDATE xianyu_accounts SET delivery_template = :t WHERE id = :id"), {"t": default_template, "id": row[0]})
+            db.commit()
+            logger.info(f"已为 {len(rows)} 个账户设置默认发货模板")
+    except Exception as e:
+        logger.warning(f"设置默认发货模板: {e}")
+        db.rollback()
+
+    db.close()
 
 
 def init_default_settings():

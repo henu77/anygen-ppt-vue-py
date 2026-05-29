@@ -1,9 +1,9 @@
 """APScheduler 封装 — 定时任务生命周期管理"""
 import asyncio
 import importlib
-from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from app.models.base import now_cn
 from loguru import logger
 
 # task_type → 执行函数的映射
@@ -36,7 +36,7 @@ def _make_wrapper(task_id: int, task_type: str, config: dict):
             return
 
         db = SessionLocal()
-        started_at = datetime.utcnow()
+        started_at = now_cn()
         t0 = asyncio.get_event_loop().time()
         try:
             ScheduledTaskService.update_task(db, task_id, last_run_status="running")
@@ -114,7 +114,7 @@ def run_job_now(task_id: int):
     job_id = f"scheduled_task_{task_id}"
     job = scheduler.get_job(job_id)
     if job:
-        job.modify(next_run_time=datetime.utcnow())
+        job.modify(next_run_time=now_cn())
 
 
 def start():

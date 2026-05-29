@@ -16,27 +16,34 @@ class XianyuService:
             if nickname:
                 account.nickname = nickname
         else:
-            account = XianyuAccount(account_id=account_id, cookies=cookies, unb=unb, nickname=nickname, status="active")
+            default_template = "您的卡密为：{key}\n\n自助导出网站：https://caimaapi.ccwu.cc"
+            account = XianyuAccount(account_id=account_id, cookies=cookies, unb=unb, nickname=nickname, delivery_template=default_template, status="active")
             db.add(account)
 
         db.commit()
         logger.info(f"[{account.nickname or '-'}] 绑定闲鱼账户: {account_id}")
 
-        # 自动创建 Cookie 续期定时任务
-        if is_new:
-            try:
-                from app.services.scheduled_task import ScheduledTaskService
-                from app import scheduler as task_scheduler
+        # 自动创建或更新 Cookie 续期定时任务
+        try:
+            from app.services.scheduled_task import ScheduledTaskService
+            from app import scheduler as task_scheduler
+            task_name = f"Cookie续期-{account.nickname or account_id}"
+            if is_new:
                 task = ScheduledTaskService.create_task(
                     db,
-                    name=f"Cookie续期-{account.nickname or account_id}",
+                    name=task_name,
                     task_type="xianyu_cookie_renew",
                     interval_seconds=3600,
                     config={"account_id": account_id},
                 )
                 task_scheduler.add_job(task.id, task.task_type, task.interval_seconds, task.config)
-            except Exception as e:
-                logger.warning(f"创建续期任务失败: {e}")
+            else:
+                # 已有账户：更新任务名称
+                existing_task = ScheduledTaskService.get_task_by_type_and_config(db, "xianyu_cookie_renew", account_id)
+                if existing_task and existing_task.name != task_name:
+                    ScheduledTaskService.update_task(db, existing_task.id, name=task_name)
+        except Exception as e:
+            logger.warning(f"创建续期任务失败: {e}")
 
         return account
 

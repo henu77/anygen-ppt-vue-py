@@ -124,6 +124,10 @@ export const xianyuOrdersAPI = {
     apiClient.get('/api/xianyu/orders', { params: { accountId, status } }),
   confirmDelivery: (orderNo: string) =>
     apiClient.post(`/api/xianyu/orders/${orderNo}/confirm-delivery`),
+  getSoldOrders: (accountId: string, page?: number, pageSize?: number) =>
+    apiClient.get('/api/xianyu/orders/sold', { params: { accountId, page, pageSize } }),
+  getOrderDetail: (orderId: string, accountId: string) =>
+    apiClient.get(`/api/xianyu/orders/${orderId}/detail`, { params: { accountId } }),
 }
 
 // 闲鱼多账户相关
@@ -138,6 +142,8 @@ export const xianyuMultiAPI = {
     apiClient.post('/api/xianyu-multi/template', { accountId, deliveryTemplate }),
   getOrders: (accountId: string, status?: string) =>
     apiClient.get('/api/xianyu-multi/orders', { params: { accountId, status } }),
+  relogin: (accountId: string, cookies: string, nickname?: string) =>
+    apiClient.post('/api/xianyu-multi/relogin', { accountId, cookies, nickname }),
 }
 
 // 定时任务相关
@@ -146,6 +152,8 @@ export const scheduledTasksAPI = {
     apiClient.get('/api/scheduled-tasks'),
   update: (id: number, data: { name?: string; enabled?: boolean; interval_seconds?: number }) =>
     apiClient.put(`/api/scheduled-tasks/${id}`, data),
+  delete: (id: number) =>
+    apiClient.delete(`/api/scheduled-tasks/${id}`),
   runNow: (id: number) =>
     apiClient.post(`/api/scheduled-tasks/${id}/run`),
   getLogs: (id: number) =>

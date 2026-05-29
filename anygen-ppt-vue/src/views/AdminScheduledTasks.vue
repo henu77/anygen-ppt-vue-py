@@ -15,8 +15,8 @@
         </div>
       </template>
 
-      <!-- 桌面表格 -->
-      <div class="hidden md:block overflow-x-auto">
+      <!-- 任务表格 -->
+      <div class="overflow-x-auto">
         <el-table :data="tasks" stripe border v-loading="loading">
           <el-table-column prop="id" label="ID" width="60" />
           <el-table-column prop="name" label="任务名称" min-width="160" />
@@ -62,43 +62,20 @@
             </template>
           </el-table-column>
           <el-table-column prop="run_count" label="执行次数" width="80" align="center" />
-          <el-table-column label="操作" width="150" fixed="right">
+          <el-table-column label="操作" width="200" fixed="right">
             <template #default="{ row }">
               <el-button link type="primary" size="small" @click="runNow(row)" :loading="row._running">
-                手动执行
+                执行
               </el-button>
               <el-button link type="info" size="small" @click="showLogs(row)">
                 日志
               </el-button>
+              <el-button link type="danger" size="small" @click="deleteTask(row)">
+                删除
+              </el-button>
             </template>
           </el-table-column>
         </el-table>
-      </div>
-
-      <!-- 移动端卡片 -->
-      <div class="md:hidden space-y-3">
-        <div v-for="task in tasks" :key="task.id" class="task-mobile-card">
-          <div class="flex items-center justify-between mb-2">
-            <span class="font-semibold text-sm">{{ task.name }}</span>
-            <el-switch v-model="task.enabled" @change="(val: boolean) => toggleEnabled(task, val)" size="small" />
-          </div>
-          <div class="flex items-center gap-2 text-xs text-gray-500 mb-2">
-            <el-tag size="small">{{ taskTypeLabel(task.task_type) }}</el-tag>
-            <span>间隔 {{ task.interval_seconds }}s</span>
-            <span>已执行 {{ task.run_count }} 次</span>
-          </div>
-          <div v-if="task.last_run_at" class="text-xs text-gray-500 mb-2">
-            上次: {{ formatTime(task.last_run_at) }}
-            <el-tag :type="statusType(task.last_run_status)" size="small" class="ml-1">
-              {{ statusLabel(task.last_run_status) }}
-            </el-tag>
-            <div v-if="task.last_run_message" class="mt-1 text-gray-400">{{ task.last_run_message }}</div>
-          </div>
-          <div class="flex gap-2 mt-2">
-            <el-button size="small" type="primary" @click="runNow(task)" :loading="task._running">手动执行</el-button>
-            <el-button size="small" @click="showLogs(task)">日志</el-button>
-          </div>
-        </div>
       </div>
 
       <div v-if="tasks.length === 0 && !loading" class="text-center py-12 text-gray-400">
@@ -115,7 +92,12 @@
             <el-tag :type="statusType(row.status)" size="small">{{ statusLabel(row.status) }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="message" label="消息" min-width="200" show-overflow-tooltip />
+        <el-table-column label="消息" min-width="200">
+          <template #default="{ row }">
+            <span v-if="row.message" :title="row.message">{{ row.message }}</span>
+            <span v-else class="text-gray-400">-</span>
+          </template>
+        </el-table-column>
         <el-table-column label="耗时" width="80">
           <template #default="{ row }">
             <span v-if="row.duration_ms != null">{{ row.duration_ms }}ms</span>
@@ -136,7 +118,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import { scheduledTasksAPI } from '@/services/api'
 
@@ -223,6 +205,23 @@ const runNow = async (task: Task) => {
   }
 }
 
+const deleteTask = async (task: Task) => {
+  try {
+    await ElMessageBox.confirm(`确定删除任务「${task.name}」吗？`, '删除确认', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+    await scheduledTasksAPI.delete(task.id)
+    ElMessage.success('已删除')
+    loadTasks()
+  } catch (err: any) {
+    if (err !== 'cancel') {
+      ElMessage.error(err.message || '删除失败')
+    }
+  }
+}
+
 const showLogs = async (task: Task) => {
   showLogDialog.value = true
   logsLoading.value = true
@@ -247,13 +246,6 @@ onMounted(loadTasks)
 .tasks-card {
   border-radius: 8px;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.05);
-}
-
-.task-mobile-card {
-  background: #fff;
-  border: 1px solid #ebeef5;
-  border-radius: 10px;
-  padding: 14px;
 }
 
 @media (max-width: 768px) {

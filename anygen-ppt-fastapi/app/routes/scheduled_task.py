@@ -86,6 +86,22 @@ async def run_task(
     return ok(message="任务已触发")
 
 
+@router.delete("/scheduled-tasks/{task_id}")
+async def delete_task(
+    task_id: int,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(verify_admin),
+):
+    task = ScheduledTaskService.get_task(db, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    task_scheduler.remove_job(task_id)
+    ScheduledTaskService.delete_task(db, task_id)
+    logger.info(f"删除定时任务 [{task_id}]")
+    return ok(message="任务已删除")
+
+
 @router.get("/scheduled-tasks/{task_id}/logs")
 async def get_task_logs(
     task_id: int,

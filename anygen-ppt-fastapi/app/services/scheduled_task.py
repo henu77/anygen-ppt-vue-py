@@ -1,7 +1,8 @@
+from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from app.models.scheduled_task import ScheduledTask, ScheduledTaskLog
-from datetime import datetime
+from app.models.base import now_cn
 from loguru import logger
 
 
@@ -86,7 +87,7 @@ class ScheduledTaskService:
 
         task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
         if task:
-            task.last_run_at = datetime.utcnow()
+            task.last_run_at = now_cn()
             task.last_run_status = status
             task.last_run_message = message
             task.run_count = (task.run_count or 0) + 1

@@ -46,6 +46,7 @@
               </el-button>
               <template #dropdown>
                 <el-dropdown-menu>
+                  <el-dropdown-item command="relogin">重新登录</el-dropdown-item>
                   <el-dropdown-item command="edit">编辑模板</el-dropdown-item>
                   <el-dropdown-item command="orders">查看订单</el-dropdown-item>
                   <el-dropdown-item command="unbind" divided>
@@ -163,15 +164,46 @@
         </div>
       </div>
     </el-dialog>
+
+    <!-- 重新登录对话框 -->
+    <el-dialog v-model="showReloginDialog" title="重新登录" width="450px" :close-on-click-modal="false">
+      <div class="text-center">
+        <el-steps :active="reloginStep" process-status="success" class="mb-6">
+          <el-step title="获取二维码" />
+          <el-step title="扫码" />
+          <el-step title="完成" />
+        </el-steps>
+
+        <div v-if="reloginStep === 0">
+          <el-button type="primary" size="large" @click="startRelogin" :loading="reloginLoading">
+            获取二维码
+          </el-button>
+        </div>
+
+        <div v-if="reloginStep === 1">
+          <el-alert type="info" :closable="false" class="mb-4">请使用闲鱼APP扫描二维码（{{ reloginPollCount }}）</el-alert>
+          <div v-if="reloginQrCode" class="qr-box mb-4">
+            <img :src="reloginQrCode" alt="QR Code" class="qr-img" />
+          </div>
+          <el-button @click="cancelRelogin">取消</el-button>
+        </div>
+
+        <div v-if="reloginStep === 2">
+          <el-icon class="text-5xl text-green-500 mb-4"><SuccessFilled /></el-icon>
+          <p class="text-lg font-semibold">重新登录成功！</p>
+          <p v-if="reloginNickname" class="text-sm text-gray-500 mt-2">昵称：{{ reloginNickname }}</p>
+        </div>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh, ArrowDown } from '@element-plus/icons-vue'
+import { Plus, Refresh, ArrowDown, SuccessFilled } from '@element-plus/icons-vue'
 import { useRouter } from 'vue-router'
-import { xianyuMultiAPI } from '@/services/api'
+import { xianyuMultiAPI, xianyuLoginAPI } from '@/services/api'
 
 interface Account {
   id: number
@@ -212,6 +244,18 @@ const templateForm = ref({
 // 订单查看对话框
 const showOrdersDialog = ref(false)
 const accountOrders = ref<Order[]>([])
+
+// 重新登录
+const showReloginDialog = ref(false)
+const reloginStep = ref(0)
+const reloginLoading = ref(false)
+const reloginAccountId = ref('')
+const reloginQrCode = ref('')
+const reloginSessionId = ref('')
+const reloginCookies = ref('')
+const reloginNickname = ref('')
+const reloginPollCount = ref(0)
+let reloginPollTimer: ReturnType<typeof setTimeout> | null = null
 
 const formatTime = (time: string) => {
   return new Date(time).toLocaleString('zh-CN')
@@ -271,7 +315,16 @@ const refreshAccounts = async () => {
 }
 
 const handleAccountAction = (command: string, account: Account) => {
-  if (command === 'edit') {
+  if (command === 'relogin') {
+    reloginAccountId.value = account.account_id
+    reloginStep.value = 0
+    reloginQrCode.value = ''
+    reloginSessionId.value = ''
+    reloginCookies.value = ''
+    reloginNickname.value = ''
+    reloginPollCount.value = 0
+    showReloginDialog.value = true
+  } else if (command === 'edit') {
     templateForm.value.accountId = account.account_id
     templateForm.value.deliveryTemplate = account.delivery_template || ''
     showTemplateDialog.value = true
@@ -331,6 +384,70 @@ const loadAccountOrders = async (accountId: string) => {
     message.value = err.message || '加载订单失败'
     messageType.value = 'error'
   }
+}
+
+const startRelogin = async () => {
+  reloginLoading.value = true
+  try {
+    const res = await xianyuLoginAPI.getQrCode()
+    if (!res.data.qrCode || !res.data.sessionId) {
+      ElMessage.error('生成二维码失败')
+      return
+    }
+    reloginQrCode.value = res.data.qrCode
+    reloginSessionId.value = res.data.sessionId
+    reloginStep.value = 1
+    reloginPollCount.value = 0
+    pollRelogin()
+  } catch (err: any) {
+    ElMessage.error(err.message || '获取二维码失败')
+  } finally {
+    reloginLoading.value = false
+  }
+}
+
+const pollRelogin = () => {
+  if (reloginPollTimer) clearTimeout(reloginPollTimer)
+  reloginPollTimer = setTimeout(async () => {
+    try {
+      const res = await xianyuLoginAPI.checkLogin(reloginSessionId.value)
+      if (res.data.status === 'success') {
+        reloginCookies.value = res.data.cookies || ''
+        // 验证 Cookie
+        const verifyRes = await xianyuLoginAPI.verifyCookies(reloginCookies.value)
+        if (verifyRes.data.valid) {
+          reloginNickname.value = verifyRes.data.nickname || ''
+          // 调用 relogin API 更新账户
+          await xianyuMultiAPI.relogin(reloginAccountId.value, reloginCookies.value, reloginNickname.value)
+          reloginStep.value = 2
+          ElMessage.success('重新登录成功')
+          refreshAccounts()
+        } else {
+          ElMessage.error('Cookie 验证失败')
+          reloginStep.value = 0
+        }
+      } else if (['pending', 'waiting', 'scanned'].includes(res.data.status)) {
+        reloginPollCount.value++
+        if (reloginPollCount.value < 120) {
+          pollRelogin()
+        } else {
+          ElMessage.error('登录超时')
+          reloginStep.value = 0
+        }
+      } else if (res.data.status === 'failed' || res.data.status === 'expired') {
+        ElMessage.error(res.data.message || '登录失败')
+        reloginStep.value = 0
+      }
+    } catch (err: any) {
+      ElMessage.error(err.message || '轮询失败')
+    }
+  }, 2000)
+}
+
+const cancelRelogin = () => {
+  if (reloginPollTimer) clearTimeout(reloginPollTimer)
+  showReloginDialog.value = false
+  reloginStep.value = 0
 }
 
 onMounted(() => {
@@ -418,5 +535,19 @@ onMounted(() => {
 .orders-preview {
   max-height: 500px;
   overflow-y: auto;
+}
+
+.qr-box {
+  display: inline-block;
+  padding: 16px;
+  background: #fff;
+  border: 2px solid #dcdfe6;
+  border-radius: 8px;
+}
+
+.qr-img {
+  width: 260px;
+  height: 260px;
+  image-rendering: pixelated;
 }
 </style>

@@ -1,7 +1,8 @@
-from datetime import datetime
+from datetime import timedelta
 from sqlalchemy.orm import Session
 from app.models.task import Task
 from app.models.key import Key
+from app.models.base import now_cn
 from loguru import logger
 
 
@@ -39,7 +40,7 @@ class TaskService:
             if file_path:
                 task.file_path = file_path
             if status in ["done", "failed"]:
-                task.completed_at = datetime.utcnow()
+                task.completed_at = now_cn()
             db.commit()
             logger.info(f"更新任务 {task_id} 状态为 {status}")
         return task
@@ -76,9 +77,7 @@ class TaskService:
     @staticmethod
     def cleanup_tasks(db: Session, days: int = 7) -> int:
         """清理过期任务"""
-        from datetime import timedelta
-
-        cutoff_date = datetime.utcnow() - timedelta(days=days)
+        cutoff_date = now_cn() - timedelta(days=days)
         count = db.query(Task).filter(Task.completed_at < cutoff_date).delete()
         db.commit()
         logger.info(f"清理 {count} 个过期任务")

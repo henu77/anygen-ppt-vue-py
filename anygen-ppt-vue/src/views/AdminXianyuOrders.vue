@@ -94,8 +94,8 @@
         </div>
       </template>
 
-      <!-- 桌面表格 -->
-      <div class="hidden md:block overflow-x-auto">
+      <!-- 订单表格 -->
+      <div class="overflow-x-auto">
       <el-table
         :data="orders"
         stripe
@@ -158,45 +158,6 @@
           </template>
         </el-table-column>
       </el-table>
-      </div>
-
-      <!-- 移动端卡片 -->
-      <div class="md:hidden space-y-3">
-        <div
-          v-for="order in orders"
-          :key="order.id"
-          class="order-mobile-card"
-        >
-          <div class="flex items-center justify-between mb-2">
-            <code class="font-mono text-xs text-gray-600">{{ order.order_no }}</code>
-            <el-tag :type="getStatusType(order.status)" size="small">
-              {{ formatStatus(order.status) }}
-            </el-tag>
-          </div>
-          <div class="flex items-center justify-between mb-2">
-            <span class="text-sm text-gray-700">{{ order.buyer_nick || '未知买家' }}</span>
-            <span v-if="order.amount" class="text-sm font-semibold">¥{{ (order.amount / 100).toFixed(2) }}</span>
-          </div>
-          <div class="flex items-center gap-3 text-xs text-gray-500 mb-2">
-            <el-tag :type="order.key_sent ? 'success' : 'info'" size="small">
-              {{ order.key_sent ? '已发密钥' : '未发密钥' }}
-            </el-tag>
-            <el-tag :type="order.delivery_confirmed ? 'success' : 'info'" size="small">
-              {{ order.delivery_confirmed ? '已确认' : '未确认' }}
-            </el-tag>
-          </div>
-          <div class="text-xs text-gray-400">{{ formatTime(order.created_at) }}</div>
-          <div v-if="order.status !== 'completed' && !order.delivery_confirmed" class="mt-2 pt-2 border-t border-gray-100">
-            <el-button
-              size="small"
-              type="primary"
-              @click="confirmDelivery(order.order_no)"
-              :loading="confirmingOrderNo === order.order_no"
-            >
-              确认发货
-            </el-button>
-          </div>
-        </div>
       </div>
 
       <div v-if="orders.length === 0" class="text-center py-12 text-gray-400">
@@ -363,19 +324,6 @@ const confirmDelivery = async (orderNo: string) => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-}
-
-/* 移动端卡片 */
-.order-mobile-card {
-  background: #fff;
-  border: 1px solid #ebeef5;
-  border-radius: 10px;
-  padding: 14px;
-  transition: box-shadow 0.2s;
-}
-
-.order-mobile-card:active {
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
 }
 
 @media (max-width: 768px) {

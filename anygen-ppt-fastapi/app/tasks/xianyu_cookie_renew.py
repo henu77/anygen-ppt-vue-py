@@ -60,7 +60,7 @@ async def run(config: dict) -> dict:
                 # 发送邮件通知
                 try:
                     from app.utils.email import send_email
-                    from datetime import datetime
+                    from app.models.base import now_cn
                     send_email(
                         subject=f"[闲鱼保活] 账户 {nickname} Cookie续期失败，需要重新扫码",
                         body=f"""
@@ -68,7 +68,7 @@ async def run(config: dict) -> dict:
                         <p><b>账户：</b>{nickname} ({account_id})</p>
                         <p><b>状态：</b>连续失败 {count} 次，已自动禁用续期任务</p>
                         <p><b>最后失败原因：</b>{result['message']}</p>
-                        <p><b>时间：</b>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+                        <p><b>时间：</b>{now_cn().strftime('%Y-%m-%d %H:%M:%S')}</p>
                         <hr>
                         <p>请登录管理后台重新扫码绑定该账户。</p>
                         """,
