@@ -215,7 +215,7 @@ const loadSettings = async () => {
       playwright_user_data_dir: data.playwright_user_data_dir || 'data/playwright_profile',
     }
   } catch (error: any) {
-    ElMessage.error(error.response?.data?.error || '加载设置失败')
+    ElMessage.error(error.message || '加载设置失败')
   } finally {
     loading.value = false
   }
@@ -254,7 +254,7 @@ const handleSave = async () => {
           saveSuccess.value = false
         }, 3000)
       } catch (error: any) {
-        ElMessage.error(error.response?.data?.error || '保存设置失败')
+        ElMessage.error(error.message || '保存设置失败')
       } finally {
         saving.value = false
       }

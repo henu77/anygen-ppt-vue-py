@@ -17,7 +17,7 @@ export const useAuthStore = defineStore('auth', () => {
       isAuthenticated.value = true
       return true
     } catch (err: any) {
-      error.value = err.response?.data?.error || '登录失败'
+      error.value = err.message || '登录失败'
       isAuthenticated.value = false
       return false
     } finally {

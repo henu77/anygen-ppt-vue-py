@@ -9,6 +9,7 @@ class XianyuAccount(BaseModel):
 
     account_id = Column(String(100), unique=True, nullable=False, index=True)
     unb = Column(String(255), nullable=True)
+    nickname = Column(String(255), nullable=True)
     cookies = Column(Text, nullable=True)
     delivery_template = Column(Text, nullable=True)
     status = Column(String(50), default="active", nullable=False)  # active, disabled
@@ -20,6 +21,7 @@ class XianyuAccount(BaseModel):
             "id": self.id,
             "account_id": self.account_id,
             "unb": self.unb,
+            "nickname": self.nickname,
             "delivery_template": self.delivery_template,
             "status": self.status,
             "created_at": self.created_at.isoformat() if self.created_at else None,

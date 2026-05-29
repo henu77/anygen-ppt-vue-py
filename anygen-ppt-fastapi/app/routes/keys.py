@@ -10,6 +10,7 @@ from app.schemas.key import (
 )
 from app.services.key import KeyService
 from app.utils.jwt import extract_token_from_header, verify_token
+from app.utils.response import ok
 from loguru import logger
 
 router = APIRouter(tags=["keys"])
@@ -31,7 +32,7 @@ def verify_admin(authorization: str = Header(None)):
     return payload
 
 
-@router.get("/keys", response_model=KeyListResponse)
+@router.get("/keys")
 async def list_keys(
     db: Session = Depends(get_db),
     admin: dict = Depends(verify_admin),
@@ -39,22 +40,22 @@ async def list_keys(
     """获取卡密列表"""
     keys = KeyService.list_keys(db)
     key_responses = [
-        KeyResponse(
-            id=key.id,
-            key=key.key,
-            max_uses=key.max_uses,
-            used_count=key.used_count,
-            is_super=int(key.is_super),
-            status=key.status,
-            created_at=key.created_at.isoformat() if key.created_at else None,
-            updated_at=key.updated_at.isoformat() if key.updated_at else None,
-        )
+        {
+            "id": key.id,
+            "key": key.key,
+            "max_uses": key.max_uses,
+            "used_count": key.used_count,
+            "is_super": int(key.is_super),
+            "status": key.status,
+            "created_at": key.created_at.isoformat() if key.created_at else None,
+            "updated_at": key.updated_at.isoformat() if key.updated_at else None,
+        }
         for key in keys
     ]
-    return KeyListResponse(keys=key_responses)
+    return ok(data={"keys": key_responses})
 
 
-@router.post("/keys", response_model=KeyListResponse)
+@router.post("/keys")
 async def create_keys(
     request: CreateKeysRequest,
     db: Session = Depends(get_db),
@@ -69,23 +70,23 @@ async def create_keys(
 
     keys = KeyService.create_keys(db, request.count, request.max_uses, request.is_super)
     key_responses = [
-        KeyResponse(
-            id=key.id,
-            key=key.key,
-            max_uses=key.max_uses,
-            used_count=key.used_count,
-            is_super=int(key.is_super),
-            status=key.status,
-            created_at=key.created_at.isoformat() if key.created_at else None,
-            updated_at=key.updated_at.isoformat() if key.updated_at else None,
-        )
+        {
+            "id": key.id,
+            "key": key.key,
+            "max_uses": key.max_uses,
+            "used_count": key.used_count,
+            "is_super": int(key.is_super),
+            "status": key.status,
+            "created_at": key.created_at.isoformat() if key.created_at else None,
+            "updated_at": key.updated_at.isoformat() if key.updated_at else None,
+        }
         for key in keys
     ]
     logger.info(f"创建 {request.count} 个卡密成功")
-    return KeyListResponse(keys=key_responses)
+    return ok(data={"keys": key_responses})
 
 
-@router.patch("/keys/{key_id}", response_model=KeyResponse)
+@router.patch("/keys/{key_id}")
 async def update_key(
     key_id: int,
     request: UpdateKeyRequest,
@@ -98,16 +99,16 @@ async def update_key(
         raise HTTPException(status_code=404, detail="卡密不存在")
 
     logger.info(f"更新卡密 {key_id} 状态为 {request.status}")
-    return KeyResponse(
-        id=key.id,
-        key=key.key,
-        max_uses=key.max_uses,
-        used_count=key.used_count,
-        is_super=int(key.is_super),
-        status=key.status,
-        created_at=key.created_at.isoformat() if key.created_at else None,
-        updated_at=key.updated_at.isoformat() if key.updated_at else None,
-    )
+    return ok(data={
+        "id": key.id,
+        "key": key.key,
+        "max_uses": key.max_uses,
+        "used_count": key.used_count,
+        "is_super": int(key.is_super),
+        "status": key.status,
+        "created_at": key.created_at.isoformat() if key.created_at else None,
+        "updated_at": key.updated_at.isoformat() if key.updated_at else None,
+    })
 
 
 @router.delete("/keys/{key_id}")
@@ -121,7 +122,7 @@ async def delete_key(
         raise HTTPException(status_code=404, detail="卡密不存在")
 
     logger.info(f"删除卡密 {key_id}")
-    return {"message": "删除成功"}
+    return ok(message="删除成功")
 
 
 @router.post("/keys/batch")
@@ -133,4 +134,4 @@ async def batch_update_keys(
     """批量操作卡密"""
     count = KeyService.batch_update_keys(db, request.action, request.ids, request.value)
     logger.info(f"批量 {request.action} 卡密 {count} 个")
-    return {"message": f"成功处理 {count} 个卡密"}
+    return ok(message=f"成功处理 {count} 个卡密")

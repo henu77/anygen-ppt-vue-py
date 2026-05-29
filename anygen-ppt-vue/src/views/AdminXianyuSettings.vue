@@ -32,7 +32,7 @@
         <template #header>
           <div class="account-header">
             <div class="account-title">
-              <span class="font-semibold">{{ account.account_id }}</span>
+              <span class="font-semibold">{{ account.nickname || account.account_id }}</span>
               <el-tag
                 :type="getStatusType(account.status)"
                 class="ml-3"
@@ -59,6 +59,10 @@
 
         <!-- 账户信息 -->
         <div class="account-info">
+          <div v-if="account.nickname" class="info-row">
+            <span class="info-label">昵称</span>
+            <span class="info-value font-semibold">{{ account.nickname }}</span>
+          </div>
           <div class="info-row">
             <span class="info-label">账户ID</span>
             <code class="info-value font-mono text-xs">{{ account.account_id }}</code>
@@ -172,6 +176,7 @@ import { xianyuMultiAPI } from '@/services/api'
 interface Account {
   id: number
   account_id: string
+  nickname: string | null
   status: string
   error_msg: string | null
   reply_template: string
@@ -258,7 +263,7 @@ const refreshAccounts = async () => {
     const res = await xianyuMultiAPI.list()
     accounts.value = res.data.accounts || []
   } catch (err: any) {
-    message.value = err.response?.data?.error || '加载账户失败'
+    message.value = err.message || '加载账户失败'
     messageType.value = 'error'
   } finally {
     loading.value = false
@@ -274,7 +279,7 @@ const handleAccountAction = (command: string, account: Account) => {
     loadAccountOrders(account.account_id)
   } else if (command === 'unbind') {
     ElMessageBox.confirm(
-      `确定要解绑账户 ${account.account_id} 吗？此操作不可恢复。`,
+      `确定要解绑账户 ${account.nickname || account.account_id} 吗？此操作不可恢复。`,
       '警告',
       { confirmButtonText: '解绑', cancelButtonText: '取消', type: 'warning' }
     )
@@ -285,7 +290,7 @@ const handleAccountAction = (command: string, account: Account) => {
           messageType.value = 'success'
           refreshAccounts()
         } catch (err: any) {
-          message.value = err.response?.data?.error || '解绑失败'
+          message.value = err.message || '解绑失败'
           messageType.value = 'error'
         }
       })
@@ -310,7 +315,7 @@ const saveTemplate = async () => {
     showTemplateDialog.value = false
     refreshAccounts()
   } catch (err: any) {
-    message.value = err.response?.data?.error || '保存模板失败'
+    message.value = err.message || '保存模板失败'
     messageType.value = 'error'
   } finally {
     saving.value = false
@@ -323,7 +328,7 @@ const loadAccountOrders = async (accountId: string) => {
     accountOrders.value = res.data.orders || []
     showOrdersDialog.value = true
   } catch (err: any) {
-    message.value = err.response?.data?.error || '加载订单失败'
+    message.value = err.message || '加载订单失败'
     messageType.value = 'error'
   }
 }

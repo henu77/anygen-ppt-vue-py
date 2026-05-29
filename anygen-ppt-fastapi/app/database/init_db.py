@@ -3,6 +3,7 @@ from app.models.task import Task
 from app.models.key import Key
 from app.models.settings import Settings
 from app.models.xianyu import XianyuAccount, XianyuOrder
+from app.models.scheduled_task import ScheduledTask, ScheduledTaskLog
 from app.database.db import engine, SessionLocal
 from loguru import logger
 import json
@@ -14,9 +15,32 @@ def init_db():
     Base.metadata.create_all(bind=engine)
     logger.info("数据库表创建成功")
 
+    # 数据库迁移
+    migrate_db()
+    logger.info("数据库迁移完成")
+
     # 初始化默认设置
     init_default_settings()
     logger.info("数据库初始化完成")
+
+
+def migrate_db():
+    """数据库迁移：为已有表添加新列"""
+    from sqlalchemy import text
+    db = SessionLocal()
+    try:
+        # 检查 xianyu_accounts 是否有 nickname 列
+        result = db.execute(text("PRAGMA table_info(xianyu_accounts)"))
+        columns = [row[1] for row in result.fetchall()]
+        if "nickname" not in columns:
+            db.execute(text("ALTER TABLE xianyu_accounts ADD COLUMN nickname VARCHAR(255)"))
+            db.commit()
+            logger.info("已为 xianyu_accounts 添加 nickname 列")
+    except Exception as e:
+        logger.warning(f"数据库迁移检查: {e}")
+        db.rollback()
+    finally:
+        db.close()
 
 
 def init_default_settings():

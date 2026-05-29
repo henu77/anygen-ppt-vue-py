@@ -28,6 +28,9 @@
         <el-menu-item index="/admin/settings">
           <span>系统设置</span>
         </el-menu-item>
+        <el-menu-item index="/admin/scheduled-tasks">
+          <span>定时任务</span>
+        </el-menu-item>
 
         <!-- 闲鱼功能分隔线 -->
         <el-divider class="sidebar-divider" />
@@ -96,6 +99,7 @@ const activeIndex = computed(() => {
     path === '/admin/keys' ||
     path === '/admin/tasks' ||
     path === '/admin/settings' ||
+    path === '/admin/scheduled-tasks' ||
     path === '/admin/xianyu-login' ||
     path === '/admin/xianyu-orders' ||
     path === '/admin/xianyu-settings'
@@ -115,6 +119,7 @@ const getPageTitle = (path: string) => {
     '/admin/keys': '密钥管理',
     '/admin/tasks': '任务管理',
     '/admin/settings': '系统设置',
+    '/admin/scheduled-tasks': '定时任务',
     '/admin/xianyu-login': '闲鱼账户登录',
     '/admin/xianyu-orders': '闲鱼订单管理',
     '/admin/xianyu-settings': '闲鱼多账户设置',

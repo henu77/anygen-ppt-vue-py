@@ -58,6 +58,11 @@ const routes = [
         name: 'AdminXianyuSettings',
         component: () => import('@/views/AdminXianyuSettings.vue'),
       },
+      {
+        path: 'scheduled-tasks',
+        name: 'AdminScheduledTasks',
+        component: () => import('@/views/AdminScheduledTasks.vue'),
+      },
     ],
   },
 ]

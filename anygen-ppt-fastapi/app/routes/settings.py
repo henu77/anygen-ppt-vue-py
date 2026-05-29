@@ -4,8 +4,8 @@ from app.database.db import get_db
 from app.schemas.settings import SettingsResponse, SettingsUpdateRequest
 from app.services.settings import SettingsService
 from app.utils.jwt import extract_token_from_header, verify_token
+from app.utils.response import ok
 from loguru import logger
-from typing import List
 
 router = APIRouter(tags=["settings"])
 
@@ -26,7 +26,7 @@ def verify_admin(authorization: str = Header(None)):
     return payload
 
 
-@router.get("/settings", response_model=List[SettingsResponse])
+@router.get("/settings")
 async def get_settings(
     db: Session = Depends(get_db),
     admin: dict = Depends(verify_admin),
@@ -35,16 +35,17 @@ async def get_settings(
     from app.models.settings import Settings
 
     settings = db.query(Settings).all()
-    return [
-        SettingsResponse(
-            id=s.id,
-            key=s.key,
-            value=s.value,
-            type=s.type,
-            updated_at=s.updated_at.isoformat() if s.updated_at else None,
-        )
+    data = [
+        {
+            "id": s.id,
+            "key": s.key,
+            "value": s.value,
+            "type": s.type,
+            "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+        }
         for s in settings
     ]
+    return ok(data=data)
 
 
 @router.put("/settings")
@@ -56,4 +57,4 @@ async def update_settings(
     """更新系统设置"""
     count = SettingsService.update_multiple_settings(db, request.settings)
     logger.info(f"更新 {count} 个设置")
-    return {"message": f"成功更新 {count} 个设置"}
+    return ok(message=f"成功更新 {count} 个设置")

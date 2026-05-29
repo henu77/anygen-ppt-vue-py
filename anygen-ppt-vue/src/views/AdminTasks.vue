@@ -167,7 +167,7 @@ const loadTasks = async () => {
     const res = await taskAPI.list()
     tasks.value = res.data.tasks || []
   } catch (error: any) {
-    ElMessage.error(error.response?.data?.error || '加载任务失败')
+    ElMessage.error(error.message || '加载任务失败')
   } finally {
     loading.value = false
   }
@@ -195,7 +195,7 @@ const handleRetry = async (taskId: number) => {
         loadTasks()
         ElMessage.success('已重试，请稍候...')
       } catch (error: any) {
-        ElMessage.error(error.response?.data?.error || '重试失败')
+        ElMessage.error(error.message || '重试失败')
       } finally {
         retryingId.value = null
       }
@@ -211,7 +211,7 @@ const handleCleanup = async () => {
     loadTasks()
     ElMessage.success(`已清理 ${res.data.deletedCount} 个PPT文件`)
   } catch (error: any) {
-    ElMessage.error(error.response?.data?.error || '清理失败')
+    ElMessage.error(error.message || '清理失败')
   } finally {
     cleanupLoading.value = false
   }

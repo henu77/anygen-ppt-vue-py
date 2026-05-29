@@ -9,13 +9,14 @@ from app.services.key import KeyService
 from app.services.export import ExportService
 from app.utils.validators import validate_url, validate_email, validate_key
 from app.utils.sse import stream_task_updates
+from app.utils.response import ok
 from loguru import logger
 import os
 
 router = APIRouter(tags=["export"])
 
 
-@router.post("/export", response_model=ExportResponse)
+@router.post("/export")
 async def submit_export(
     request: ExportRequest,
     background_tasks: BackgroundTasks,
@@ -56,7 +57,7 @@ async def submit_export(
     background_tasks.add_task(ExportService.export_ppt, task.id, db)
 
     logger.info(f"提交导出任务成功: {task.id}")
-    return ExportResponse(taskId=task.id, status="pending")
+    return ok(data={"taskId": task.id, "status": "pending"})
 
 
 @router.get("/download/{task_id}")

@@ -4,6 +4,7 @@ from app.database.db import get_db
 from app.schemas.task import TaskResponse, TaskListResponse, TaskStats
 from app.services.task import TaskService
 from app.utils.jwt import extract_token_from_header, verify_token
+from app.utils.response import ok
 from loguru import logger
 
 router = APIRouter(tags=["tasks"])
@@ -25,7 +26,7 @@ def verify_admin(authorization: str = Header(None)):
     return payload
 
 
-@router.get("/tasks", response_model=TaskListResponse)
+@router.get("/tasks")
 async def list_tasks(
     limit: int = 50,
     offset: int = 0,
@@ -36,52 +37,52 @@ async def list_tasks(
     stats = TaskService.get_task_stats(db)
 
     task_responses = [
-        TaskResponse(
-            id=task.id,
-            key_id=task.key_id,
-            url=task.url,
-            email=task.email,
-            status=task.status,
-            file_path=task.file_path,
-            error_msg=task.error_msg,
-            created_at=task.created_at.isoformat() if task.created_at else None,
-            completed_at=task.completed_at.isoformat() if task.completed_at else None,
-        )
+        {
+            "id": task.id,
+            "key_id": task.key_id,
+            "url": task.url,
+            "email": task.email,
+            "status": task.status,
+            "file_path": task.file_path,
+            "error_msg": task.error_msg,
+            "created_at": task.created_at.isoformat() if task.created_at else None,
+            "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+        }
         for task in tasks
     ]
 
-    return TaskListResponse(
-        tasks=task_responses,
-        stats=TaskStats(
-            total=stats["total"],
-            pending=stats["pending"],
-            done=stats["done"],
-            failed=stats["failed"],
-        ),
-    )
+    return ok(data={
+        "tasks": task_responses,
+        "stats": {
+            "total": stats["total"],
+            "pending": stats["pending"],
+            "done": stats["done"],
+            "failed": stats["failed"],
+        },
+    })
 
 
-@router.get("/tasks/{task_id}", response_model=TaskResponse)
+@router.get("/tasks/{task_id}")
 async def get_task(task_id: int, db: Session = Depends(get_db)):
     """获取任务详情"""
     task = TaskService.get_task(db, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
 
-    return TaskResponse(
-        id=task.id,
-        key_id=task.key_id,
-        url=task.url,
-        email=task.email,
-        status=task.status,
-        file_path=task.file_path,
-        error_msg=task.error_msg,
-        created_at=task.created_at.isoformat() if task.created_at else None,
-        completed_at=task.completed_at.isoformat() if task.completed_at else None,
-    )
+    return ok(data={
+        "id": task.id,
+        "key_id": task.key_id,
+        "url": task.url,
+        "email": task.email,
+        "status": task.status,
+        "file_path": task.file_path,
+        "error_msg": task.error_msg,
+        "created_at": task.created_at.isoformat() if task.created_at else None,
+        "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+    })
 
 
-@router.post("/retry/{task_id}", response_model=TaskResponse)
+@router.post("/retry/{task_id}")
 async def retry_task(
     task_id: int,
     db: Session = Depends(get_db),
@@ -93,17 +94,17 @@ async def retry_task(
         raise HTTPException(status_code=404, detail="任务不存在")
 
     logger.info(f"重试任务: {task_id}")
-    return TaskResponse(
-        id=task.id,
-        key_id=task.key_id,
-        url=task.url,
-        email=task.email,
-        status=task.status,
-        file_path=task.file_path,
-        error_msg=task.error_msg,
-        created_at=task.created_at.isoformat() if task.created_at else None,
-        completed_at=task.completed_at.isoformat() if task.completed_at else None,
-    )
+    return ok(data={
+        "id": task.id,
+        "key_id": task.key_id,
+        "url": task.url,
+        "email": task.email,
+        "status": task.status,
+        "file_path": task.file_path,
+        "error_msg": task.error_msg,
+        "created_at": task.created_at.isoformat() if task.created_at else None,
+        "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+    })
 
 
 @router.post("/cleanup")
@@ -114,4 +115,4 @@ async def cleanup_tasks(
     """清理过期任务"""
     count = TaskService.cleanup_tasks(db)
     logger.info(f"清理过期任务: {count} 个")
-    return {"message": f"清理 {count} 个过期任务"}
+    return ok(data={"deletedCount": count}, message=f"清理 {count} 个过期任务")

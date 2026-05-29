@@ -2,11 +2,14 @@ import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import HTTPException, RequestValidationError
 from app.database.init_db import init_db
-from app.routes import auth, export, tasks, query, keys, settings, xianyu
+from app.routes import auth, export, tasks, query, keys, settings, xianyu, scheduled_task
 from app.utils.logger import logger
+from app.utils.response import fail
+from app.utils.exceptions import ApiError
 from config import settings as app_settings
 
 # 初始化数据库
@@ -16,9 +19,12 @@ init_db()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
+    from app.scheduler import start as start_scheduler, shutdown as stop_scheduler
     logger.info("应用启动成功")
     logger.info(f"API 文档: http://{app_settings.HOST}:{app_settings.PORT}/docs")
+    start_scheduler()
     yield
+    stop_scheduler()
     logger.info("应用关闭")
 
 
@@ -39,6 +45,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# 统一异常处理
+@app.exception_handler(ApiError)
+async def api_error_handler(request: Request, exc: ApiError):
+    return JSONResponse(status_code=exc.code, content=fail(exc.code, exc.message))
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    return JSONResponse(status_code=exc.status_code, content=fail(exc.status_code, str(exc.detail)))
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    errors = exc.errors()
+    msg = errors[0].get("msg", "参数错误") if errors else "参数错误"
+    return JSONResponse(status_code=422, content=fail(422, msg))
+
+
 # 注册路由
 app.include_router(auth.router, prefix="/api")
 app.include_router(export.router, prefix="/api")
@@ -47,6 +72,7 @@ app.include_router(query.router, prefix="/api")
 app.include_router(keys.router, prefix="/api")
 app.include_router(settings.router, prefix="/api")
 app.include_router(xianyu.router, prefix="/api")
+app.include_router(scheduled_task.router, prefix="/api")
 
 # 提供前端静态文件 (SPA 模式)
 static_dir = os.path.join(os.path.dirname(__file__), "static")

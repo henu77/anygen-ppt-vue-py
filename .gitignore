@@ -57,4 +57,9 @@ dist-ssr/
 Thumbs.db
 ehthumbs.db
 Desktop.ini
-$RECYCLE.BIN/
+$RECYCLE.BIN/+3
+
+
+anygen_playwright_profile
+
+anygen-ppt-fastapi\.env.example

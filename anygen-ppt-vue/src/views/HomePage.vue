@@ -24,7 +24,6 @@
               placeholder="https://www.anygen.io/task/..."
               clearable
             />
-            <p class="input-hint">格式：https://www.anygen.io/task/xxx-xxx?share_id=数字</p>
           </el-form-item>
 
           <!-- Email Input -->
@@ -157,6 +156,38 @@
         <el-button type="primary" @click="dismissTutorial">我已了解</el-button>
       </template>
     </el-dialog>
+
+    <!-- URL Format Help Modal -->
+    <el-dialog
+      v-model="showUrlHelp"
+      title="链接格式不正确"
+      width="600px"
+      align-center
+    >
+      <div class="tutorial-content">
+        <el-alert
+          title="请使用正确的 AnyGen 分享链接"
+          type="warning"
+          :closable="false"
+          show-icon
+          style="margin-bottom: 20px;"
+        />
+        <div class="tutorial-item">
+          <h4>如何获取正确的链接？</h4>
+          <p>在 AnyGen 页面中点击「分享」按钮，复制生成的分享链接：</p>
+          <img src="/jiaocheng1.jpg" alt="获取分享链接步骤" class="tutorial-image" />
+        </div>
+        <div class="tutorial-item">
+          <h4>正确格式示例</h4>
+          <p style="font-family: monospace; background: #f5f7fa; padding: 10px; border-radius: 6px; word-break: break-all;">
+            https://www.anygen.io/task/xxx-xxx-PAGE_ID?share_id=数字
+          </p>
+        </div>
+      </div>
+      <template #footer>
+        <el-button type="primary" @click="showUrlHelp = false">我知道了</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -178,6 +209,7 @@ const polling = ref(false)
 const result = ref<{ taskId: number; status: string } | null>(null)
 const taskStatus = ref('')
 const showTutorial = ref(false)
+const showUrlHelp = ref(false)
 const eventSource = ref<EventSource | null>(null)
 
 const rules = {
@@ -238,7 +270,7 @@ const handleSubmit = async () => {
 
   // Validate URL format
   if (!URL_PATTERN.test(form.value.url.trim())) {
-    ElMessage.error('URL 格式不正确')
+    showUrlHelp.value = true
     return
   }
 
@@ -260,7 +292,7 @@ const handleSubmit = async () => {
     connectSSE(res.data.taskId)
     ElMessage.success('任务已提交')
   } catch (err: any) {
-    error.value = err.response?.data?.error || '提交失败'
+    error.value = err.message || '提交失败'
     ElMessage.error(error.value)
   } finally {
     loading.value = false

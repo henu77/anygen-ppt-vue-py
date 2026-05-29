@@ -20,13 +20,29 @@ apiClient.interceptors.request.use((config) => {
 
 // 响应拦截器
 apiClient.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    const data = response.data
+    // 统一格式解包：{code, data, message} → data
+    if (data && typeof data === 'object' && 'code' in data) {
+      if (data.code !== 0) {
+        return Promise.reject(new Error(data.message || '请求失败'))
+      }
+      response.data = data.data
+    }
+    return response
+  },
   (error) => {
     if (error.response?.status === 401) {
       localStorage.removeItem('admin_token')
       window.location.href = '/login'
+      return Promise.reject(error)
     }
-    return Promise.reject(error)
+    // 统一提取错误信息
+    const msg = error.response?.data?.message
+      || error.response?.data?.detail
+      || error.response?.data?.error
+      || '网络错误'
+    return Promise.reject(new Error(msg))
   }
 )
 
@@ -114,14 +130,26 @@ export const xianyuOrdersAPI = {
 export const xianyuMultiAPI = {
   list: () =>
     apiClient.get('/api/xianyu-multi'),
-  bind: (accountId: string, cookies: string) =>
-    apiClient.post('/api/xianyu-multi/bind', { accountId, cookies }),
+  bind: (accountId: string, cookies: string, nickname?: string) =>
+    apiClient.post('/api/xianyu-multi/bind', { accountId, cookies, nickname }),
   unbind: (accountId: string) =>
     apiClient.post('/api/xianyu-multi/unbind', { accountId }),
   updateTemplate: (accountId: string, deliveryTemplate: string) =>
     apiClient.post('/api/xianyu-multi/template', { accountId, deliveryTemplate }),
   getOrders: (accountId: string, status?: string) =>
     apiClient.get('/api/xianyu-multi/orders', { params: { accountId, status } }),
+}
+
+// 定时任务相关
+export const scheduledTasksAPI = {
+  list: () =>
+    apiClient.get('/api/scheduled-tasks'),
+  update: (id: number, data: { name?: string; enabled?: boolean; interval_seconds?: number }) =>
+    apiClient.put(`/api/scheduled-tasks/${id}`, data),
+  runNow: (id: number) =>
+    apiClient.post(`/api/scheduled-tasks/${id}/run`),
+  getLogs: (id: number) =>
+    apiClient.get(`/api/scheduled-tasks/${id}/logs`),
 }
 
 export default apiClient

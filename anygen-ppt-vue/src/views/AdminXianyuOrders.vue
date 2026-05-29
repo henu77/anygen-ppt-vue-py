@@ -16,11 +16,20 @@
         <el-row :gutter="20">
           <el-col :xs="24" :sm="12" :md="8">
             <el-form-item label="账号ID">
-              <el-input
+              <el-select
                 v-model="queryForm.accountId"
-                placeholder="输入闲鱼账号ID"
+                placeholder="选择闲鱼账号"
+                filterable
                 clearable
-              />
+                style="width: 100%"
+              >
+                <el-option
+                  v-for="account in accountList"
+                  :key="account.account_id"
+                  :label="account.nickname ? `${account.nickname} (${account.account_id})` : account.account_id"
+                  :value="account.account_id"
+                />
+              </el-select>
             </el-form-item>
           </el-col>
           <el-col :xs="24" :sm="12" :md="8">
@@ -201,10 +210,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search } from '@element-plus/icons-vue'
-import { xianyuOrdersAPI } from '@/services/api'
+import { xianyuOrdersAPI, xianyuMultiAPI } from '@/services/api'
 
 interface Order {
   id: number
@@ -231,10 +240,22 @@ const queryForm = ref({
 })
 
 const orders = ref<Order[]>([])
+const accountList = ref<{ account_id: string; nickname?: string; unb?: string }[]>([])
 const stats = ref<Stats | null>(null)
 const loading = ref(false)
 const error = ref('')
 const confirmingOrderNo = ref<string>('')
+
+const loadAccounts = async () => {
+  try {
+    const res = await xianyuMultiAPI.list()
+    accountList.value = res.data.accounts || []
+  } catch (err: any) {
+    console.error('加载账号列表失败:', err)
+  }
+}
+
+onMounted(loadAccounts)
 
 const formatTime = (time: string) => {
   return new Date(time).toLocaleString('zh-CN')
@@ -273,7 +294,7 @@ const fetchOrders = async () => {
     orders.value = res.data.orders || []
     stats.value = res.data.stats || null
   } catch (err: any) {
-    error.value = err.response?.data?.error || '加载订单失败'
+    error.value = err.message || '加载订单失败'
   } finally {
     loading.value = false
   }
@@ -292,7 +313,7 @@ const confirmDelivery = async (orderNo: string) => {
         fetchOrders()
         ElMessage.success('发货已确认')
       } catch (err: any) {
-        error.value = err.response?.data?.error || '确认发货失败'
+        error.value = err.message || '确认发货失败'
       } finally {
         confirmingOrderNo.value = ''
       }

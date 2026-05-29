@@ -4,12 +4,13 @@ from app.database.db import get_db
 from app.schemas.auth import LoginRequest, AuthResponse
 from app.services.auth import AuthService
 from app.utils.jwt import extract_token_from_header, verify_token
+from app.utils.response import ok
 from loguru import logger
 
 router = APIRouter(tags=["auth"])
 
 
-@router.post("/auth", response_model=AuthResponse)
+@router.post("/auth")
 async def login(request: LoginRequest, db: Session = Depends(get_db)):
     """管理员登录"""
     if not AuthService.verify_password(request.password):
@@ -17,10 +18,10 @@ async def login(request: LoginRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="密码错误")
 
     token = AuthService.generate_token()
-    return AuthResponse(valid=True, token=token)
+    return ok(data={"valid": True, "token": token})
 
 
-@router.get("/auth", response_model=AuthResponse)
+@router.get("/auth")
 async def verify(authorization: str = Header(None), db: Session = Depends(get_db)):
     """验证 token 有效性"""
     if not authorization:
@@ -33,4 +34,4 @@ async def verify(authorization: str = Header(None), db: Session = Depends(get_db
     if not AuthService.verify_token_valid(token):
         raise HTTPException(status_code=401, detail="Token 无效或已过期")
 
-    return AuthResponse(valid=True)
+    return ok(data={"valid": True})

@@ -86,6 +86,8 @@
           </el-icon>
           <p class="success-title">登录成功！</p>
           <p class="success-desc">闲鱼账户已验证，Cookie 有效</p>
+          <p v-if="nickname" class="text-sm text-gray-700 mt-2">昵称：<span class="font-semibold">{{ nickname }}</span></p>
+          <p v-if="accountId" class="text-xs text-gray-500 mt-1">账号ID：{{ accountId }}</p>
 
           <el-divider />
 
@@ -109,7 +111,7 @@
 import { ref, computed, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { CirclePlus, Loading, Check, SuccessFilled, Plus } from '@element-plus/icons-vue'
-import { xianyuLoginAPI } from '@/services/api'
+import { xianyuLoginAPI, xianyuMultiAPI } from '@/services/api'
 
 type Step = 'qrcode' | 'polling' | 'verify' | 'success'
 
@@ -125,6 +127,8 @@ let pollingTimer: NodeJS.Timeout | null = null
 const verifyForm = ref({
   cookies: '',
 })
+const accountId = ref('')
+const nickname = ref('')
 
 const stepIndex = computed(() => {
   const steps: Record<Step, number> = {
@@ -141,13 +145,17 @@ const getQrCode = async () => {
   error.value = ''
   try {
     const res = await xianyuLoginAPI.getQrCode()
-    qrCode.value = res.data.qrCode || ''
-    sessionId.value = res.data.sessionId || ''
+    if (!res.data.qrCode || !res.data.sessionId) {
+      error.value = '生成二维码失败，请重试'
+      return
+    }
+    qrCode.value = res.data.qrCode
+    sessionId.value = res.data.sessionId
     step.value = 'polling'
     pollingCount.value = 0
     startPolling()
   } catch (err: any) {
-    error.value = err.response?.data?.error || '获取二维码失败'
+    error.value = err.message || '获取二维码失败'
   } finally {
     loading.value = false
   }
@@ -162,9 +170,10 @@ const startPolling = () => {
 
       if (res.data.status === 'success') {
         cookies.value = res.data.cookies || ''
+        accountId.value = res.data.unb || ''
         verifyForm.value.cookies = cookies.value
         step.value = 'verify'
-      } else if (res.data.status === 'pending') {
+      } else if (['pending', 'waiting', 'scanned'].includes(res.data.status)) {
         pollingCount.value++
         if (pollingCount.value < 120) {
           // 最多轮询2分钟
@@ -173,12 +182,15 @@ const startPolling = () => {
           error.value = '登录超时，请重新生成二维码'
           step.value = 'qrcode'
         }
-      } else if (res.data.status === 'failed') {
-        error.value = res.data.error || '登录失败，请重试'
+      } else if (res.data.status === 'failed' || res.data.status === 'expired') {
+        error.value = res.data.error || res.data.message || '登录失败，请重试'
+        step.value = 'qrcode'
+      } else if (res.data.status === 'verification_required') {
+        error.value = res.data.message || '账号需要手机验证'
         step.value = 'qrcode'
       }
     } catch (err: any) {
-      error.value = err.response?.data?.error || '轮询失败'
+      error.value = err.message || '轮询失败'
     }
   }, 2000)
 }
@@ -202,13 +214,22 @@ const verifyCookies = async () => {
     const res = await xianyuLoginAPI.verifyCookies(verifyForm.value.cookies)
 
     if (res.data.valid) {
+      nickname.value = res.data.nickname || ''
+      // 验证成功后自动绑定账户到数据库
+      if (accountId.value && verifyForm.value.cookies.trim()) {
+        try {
+          await xianyuMultiAPI.bind(accountId.value, verifyForm.value.cookies.trim(), nickname.value)
+        } catch {
+          // 绑定失败不影响验证结果
+        }
+      }
       step.value = 'success'
       ElMessage.success('Cookie 验证成功')
     } else {
       error.value = 'Cookie 无效，请重试'
     }
   } catch (err: any) {
-    error.value = err.response?.data?.error || 'Cookie 验证失败'
+    error.value = err.message || 'Cookie 验证失败'
   } finally {
     loading.value = false
   }
@@ -219,6 +240,7 @@ const resetLogin = () => {
   qrCode.value = ''
   sessionId.value = ''
   cookies.value = ''
+  nickname.value = ''
   error.value = ''
   pollingCount.value = 0
   verifyForm.value.cookies = ''

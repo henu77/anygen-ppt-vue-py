@@ -17,6 +17,7 @@ from app.schemas.xianyu import (
 from app.services.xianyu import XianyuService
 from app.external.xianyu_client import xianyu_client
 from app.utils.jwt import extract_token_from_header, verify_token
+from app.utils.response import ok
 from loguru import logger
 
 router = APIRouter(tags=["xianyu"])
@@ -38,24 +39,29 @@ def verify_admin(authorization: str = Header(None)):
     return payload
 
 
-@router.post("/xianyu/login", response_model=QRCodeResponse)
+@router.post("/xianyu/login")
 async def get_qr_code(db: Session = Depends(get_db)):
     """生成闲鱼登录二维码"""
     try:
         result = await xianyu_client.generate_qr_code()
-        logger.info(f"生成二维码成功: {result.get('session_id')}")
-        return QRCodeResponse(
-            success=result.get("success"),
-            session_id=result.get("session_id"),
-            qr_code_url=result.get("qr_code_url"),
-            message=result.get("message"),
-        )
     except Exception as e:
         logger.error(f"生成二维码失败: {e}")
-        return QRCodeResponse(success=False, message=str(e))
+        raise HTTPException(status_code=500, detail=f"生成二维码失败: {e}")
+
+    if not result.get("success") or not result.get("session_id"):
+        msg = result.get("message", "生成二维码失败")
+        logger.error(f"生成二维码失败: {msg}")
+        raise HTTPException(status_code=500, detail=msg)
+
+    logger.info(f"生成二维码成功: {result.get('session_id')}")
+    return ok(data={
+        "sessionId": result.get("session_id"),
+        "qrCode": result.get("qr_code_url"),
+        "message": result.get("message"),
+    })
 
 
-@router.post("/xianyu/login/check", response_model=LoginCheckResponse)
+@router.post("/xianyu/login/check")
 async def check_login(
     request: LoginCheckRequest,
     db: Session = Depends(get_db),
@@ -64,17 +70,18 @@ async def check_login(
     try:
         result = xianyu_client.check_login_status(request.sessionId)
         logger.info(f"检查登录状态: {request.sessionId} -> {result.get('status')}")
-        return LoginCheckResponse(
-            status=result.get("status"),
-            session_id=result.get("session_id"),
-            cookies=result.get("cookies"),
-            unb=result.get("unb"),
-            verification_url=result.get("verification_url"),
-            message=result.get("message"),
-        )
+        return ok(data={
+            "status": result.get("status"),
+            "sessionId": result.get("session_id"),
+            "cookies": result.get("cookies"),
+            "unb": result.get("unb"),
+            "verificationUrl": result.get("verification_url"),
+            "message": result.get("message"),
+            "error": result.get("error"),
+        })
     except Exception as e:
         logger.error(f"检查登录状态失败: {e}")
-        return LoginCheckResponse(status="error", session_id=request.sessionId, message=str(e))
+        return ok(data={"status": "error", "session_id": request.sessionId, "message": str(e)})
 
 
 @router.post("/xianyu/login/verify")
@@ -82,17 +89,19 @@ async def verify_cookies(
     request: VerifyCookiesRequest,
     db: Session = Depends(get_db),
 ):
-    """验证 cookies"""
-    try:
-        # 这里可以添加 cookies 验证逻辑
-        logger.info("验证 cookies 成功")
-        return {"success": True, "message": "Cookies 有效"}
-    except Exception as e:
-        logger.error(f"验证 cookies 失败: {e}")
-        return {"success": False, "message": str(e)}
+    """验证 cookies 是否有效"""
+    result = await xianyu_client.verify_cookies(request.cookies)
+    if not result.get("valid"):
+        raise HTTPException(status_code=400, detail=result.get("message", "Cookies 无效"))
+    return ok(data={
+        "valid": True,
+        "message": result.get("message", "Cookies 有效"),
+        "nickname": result.get("nickname", ""),
+        "user_data": result.get("user_data", {}),
+    })
 
 
-@router.get("/xianyu-multi", response_model=XianyuAccountListResponse)
+@router.get("/xianyu-multi")
 async def list_accounts(
     db: Session = Depends(get_db),
     admin: dict = Depends(verify_admin),
@@ -100,38 +109,40 @@ async def list_accounts(
     """获取闲鱼账户列表"""
     accounts = XianyuService.list_accounts(db)
     account_responses = [
-        XianyuAccountResponse(
-            id=acc.id,
-            account_id=acc.account_id,
-            unb=acc.unb,
-            delivery_template=acc.delivery_template,
-            status=acc.status,
-            created_at=acc.created_at.isoformat() if acc.created_at else None,
-            updated_at=acc.updated_at.isoformat() if acc.updated_at else None,
-        )
+        {
+            "id": acc.id,
+            "account_id": acc.account_id,
+            "unb": acc.unb,
+            "nickname": acc.nickname,
+            "delivery_template": acc.delivery_template,
+            "status": acc.status,
+            "created_at": acc.created_at.isoformat() if acc.created_at else None,
+            "updated_at": acc.updated_at.isoformat() if acc.updated_at else None,
+        }
         for acc in accounts
     ]
-    return XianyuAccountListResponse(accounts=account_responses)
+    return ok(data={"accounts": account_responses})
 
 
-@router.post("/xianyu-multi/bind", response_model=XianyuAccountResponse)
+@router.post("/xianyu-multi/bind")
 async def bind_account(
     request: BindAccountRequest,
     db: Session = Depends(get_db),
     admin: dict = Depends(verify_admin),
 ):
     """绑定闲鱼账户"""
-    account = XianyuService.bind_account(db, request.accountId, request.cookies)
-    logger.info(f"绑定闲鱼账户: {request.accountId}")
-    return XianyuAccountResponse(
-        id=account.id,
-        account_id=account.account_id,
-        unb=account.unb,
-        delivery_template=account.delivery_template,
-        status=account.status,
-        created_at=account.created_at.isoformat() if account.created_at else None,
-        updated_at=account.updated_at.isoformat() if account.updated_at else None,
-    )
+    account = XianyuService.bind_account(db, request.accountId, request.cookies, nickname=request.nickname)
+    logger.info(f"[{account.nickname or '-'}] 绑定请求: {request.accountId}")
+    return ok(data={
+        "id": account.id,
+        "account_id": account.account_id,
+        "unb": account.unb,
+        "nickname": account.nickname,
+        "delivery_template": account.delivery_template,
+        "status": account.status,
+        "created_at": account.created_at.isoformat() if account.created_at else None,
+        "updated_at": account.updated_at.isoformat() if account.updated_at else None,
+    })
 
 
 @router.post("/xianyu-multi/unbind")
@@ -141,14 +152,16 @@ async def unbind_account(
     admin: dict = Depends(verify_admin),
 ):
     """解绑闲鱼账户"""
+    account = XianyuService.get_account(db, request.accountId)
+    nickname = account.nickname if account else None
     if not XianyuService.unbind_account(db, request.accountId):
         raise HTTPException(status_code=404, detail="账户不存在")
 
-    logger.info(f"解绑闲鱼账户: {request.accountId}")
-    return {"message": "解绑成功"}
+    logger.info(f"[{nickname or '-'}] 解绑请求: {request.accountId}")
+    return ok(message="解绑成功")
 
 
-@router.post("/xianyu-multi/template", response_model=XianyuAccountResponse)
+@router.post("/xianyu-multi/template")
 async def update_template(
     request: UpdateTemplateRequest,
     db: Session = Depends(get_db),
@@ -159,19 +172,20 @@ async def update_template(
     if not account:
         raise HTTPException(status_code=404, detail="账户不存在")
 
-    logger.info(f"更新发货模板: {request.accountId}")
-    return XianyuAccountResponse(
-        id=account.id,
-        account_id=account.account_id,
-        unb=account.unb,
-        delivery_template=account.delivery_template,
-        status=account.status,
-        created_at=account.created_at.isoformat() if account.created_at else None,
-        updated_at=account.updated_at.isoformat() if account.updated_at else None,
-    )
+    logger.info(f"[{account.nickname or '-'}] 更新模板请求: {request.accountId}")
+    return ok(data={
+        "id": account.id,
+        "account_id": account.account_id,
+        "unb": account.unb,
+        "nickname": account.nickname,
+        "delivery_template": account.delivery_template,
+        "status": account.status,
+        "created_at": account.created_at.isoformat() if account.created_at else None,
+        "updated_at": account.updated_at.isoformat() if account.updated_at else None,
+    })
 
 
-@router.get("/xianyu-multi/orders", response_model=XianyuOrderListResponse)
+@router.get("/xianyu-multi/orders")
 async def get_orders(
     accountId: str = None,
     status: str = None,
@@ -181,18 +195,18 @@ async def get_orders(
     """获取订单列表"""
     orders = XianyuService.list_orders(db, accountId, status)
     order_responses = [
-        XianyuOrderResponse(
-            id=order.id,
-            order_no=order.order_no,
-            account_id=order.account_id,
-            status=order.status,
-            data=order.data,
-            created_at=order.created_at.isoformat() if order.created_at else None,
-            updated_at=order.updated_at.isoformat() if order.updated_at else None,
-        )
+        {
+            "id": order.id,
+            "order_no": order.order_no,
+            "account_id": order.account_id,
+            "status": order.status,
+            "data": order.data,
+            "created_at": order.created_at.isoformat() if order.created_at else None,
+            "updated_at": order.updated_at.isoformat() if order.updated_at else None,
+        }
         for order in orders
     ]
-    return XianyuOrderListResponse(orders=order_responses)
+    return ok(data={"orders": order_responses})
 
 
 @router.post("/xianyu/orders/{order_no}/confirm-delivery")
@@ -207,5 +221,7 @@ async def confirm_delivery(
         raise HTTPException(status_code=404, detail="订单不存在")
 
     XianyuService.update_order_status(db, order_no, "delivered")
-    logger.info(f"确认发货: {order_no}")
-    return {"message": "发货确认成功"}
+    account = XianyuService.get_account(db, order.account_id)
+    acc_name = account.nickname if account else "-"
+    logger.info(f"[{acc_name or '-'}] 确认发货: {order_no} (账户: {order.account_id})")
+    return ok(message="发货确认成功")

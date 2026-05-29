@@ -1,7 +1,8 @@
-﻿"""
+"""
 闲鱼扫码登录管理器
 
 基于API接口实现二维码生成和Cookie获取
+参照 xianyu-api/qr_login.py 重构
 """
 from __future__ import annotations
 
@@ -21,21 +22,21 @@ import qrcode
 import qrcode.constants
 from loguru import logger
 
+H5_TK_URL = "https://h5api.m.goofish.com/h5/mtop.gaia.nodejs.gaia.idle.data.gw.v2.index.get/1.0/"
+PASSPORT_HOST = "https://passport.goofish.com"
 
-def generate_headers() -> Dict[str, str]:
-    """生成请求头"""
-    return {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
-        "Referer": "https://passport.goofish.com/",
-        "Origin": "https://passport.goofish.com",
-    }
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
+    "Referer": "https://passport.goofish.com/",
+    "Origin": "https://passport.goofish.com",
+}
 
 
 class GetLoginParamsError(Exception):
@@ -66,18 +67,11 @@ class QRLoginSession:
         self.verification_url: Optional[str] = None
 
     def is_expired(self) -> bool:
-        """检查是否过期"""
         return time.time() - self.created_time > self.expire_time
 
-    def to_dict(self) -> Dict[str, Any]:
-        """转换为字典"""
-        return {
-            "session_id": self.session_id,
-            "status": self.status,
-            "qr_code_url": self.qr_code_url,
-            "created_time": self.created_time,
-            "is_expired": self.is_expired(),
-        }
+    def cookie_keys(self) -> str:
+        """调试用：列出所有 Cookie 的 key"""
+        return ", ".join(sorted(self.cookies.keys()))
 
 
 class QRLoginManager:
@@ -85,21 +79,21 @@ class QRLoginManager:
 
     def __init__(self):
         self.sessions: Dict[str, QRLoginSession] = {}
-        self.headers = generate_headers()
-        self.host = "https://passport.goofish.com"
-        self.api_mini_login = f"{self.host}/mini_login.htm"
-        self.api_generate_qr = f"{self.host}/newlogin/qrcode/generate.do"
-        self.api_scan_status = f"{self.host}/newlogin/qrcode/query.do"
-        self.api_h5_tk = "https://h5api.m.goofish.com/h5/mtop.gaia.nodejs.gaia.idle.data.gw.v2.index.get/1.0/"
-        self.proxy: Optional[str] = None
         self.timeout = httpx.Timeout(connect=30.0, read=60.0, write=30.0, pool=60.0)
+        self.proxy: Optional[str] = None
 
-    def _cookie_marshal(self, cookies: Dict[str, str]) -> str:
+    @staticmethod
+    def _cookie_marshal(cookies: Dict[str, str]) -> str:
         """将Cookie字典转换为字符串"""
-        return "; ".join([f"{k}={v}" for k, v in cookies.items()])
+        return "; ".join(f"{k}={v}" for k, v in cookies.items())
 
-    async def _get_mh5tk(self, session: QRLoginSession) -> Dict[str, str]:
-        """获取m_h5_tk和m_h5_tk_enc"""
+    # ==================== 内部方法 ====================
+
+    async def _get_mh5tk(self, session: QRLoginSession):
+        """获取 m_h5_tk 和 m_h5_tk_enc（匿名会话令牌）
+
+        第一次 GET 请求获取初始 Cookie，第二次 POST 确认会话。
+        """
         data = {"bizScene": "home"}
         data_str = json.dumps(data, separators=(",", ":"))
         t = str(int(time.time() * 1000))
@@ -108,163 +102,214 @@ class QRLoginManager:
         async with httpx.AsyncClient(
             timeout=self.timeout, follow_redirects=True, proxy=self.proxy
         ) as client:
-            try:
-                resp = await client.get(self.api_h5_tk, headers=self.headers)
-                cookies = {k: v for k, v in resp.cookies.items()}
-                session.cookies.update(cookies)
+            logger.info(f"是否使用代理{self.proxy}")
+            # GET: 从 Set-Cookie 中获取 m_h5_tk
+            resp = await client.get(H5_TK_URL, headers=HEADERS)
+            cookies = {k: v for k, v in resp.cookies.items()}
+            session.cookies.update(cookies)
 
-                m_h5_tk = cookies.get("m_h5_tk", "")
-                token = m_h5_tk.split("_")[0] if "_" in m_h5_tk else ""
+            m_h5_tk = cookies.get("_m_h5_tk", "") or cookies.get("m_h5_tk", "")
+            token = m_h5_tk.split("_")[0] if "_" in m_h5_tk else ""
+            logger.info(f"_get_mh5tk GET: 获得 {len(cookies)} 个 Cookie, keys=[{', '.join(cookies.keys())}], m_h5_tk={'有' if m_h5_tk else '空'}")
 
-                sign_input = f"{token}&{t}&{app_key}&{data_str}"
-                sign = hashlib.md5(sign_input.encode()).hexdigest()
-
-                params = {
-                    "jsv": "2.7.2",
-                    "appKey": app_key,
-                    "t": t,
-                    "sign": sign,
-                    "v": "1.0",
-                    "type": "originaljson",
-                    "dataType": "json",
-                    "timeout": 20000,
-                    "api": "mtop.gaia.nodejs.gaia.idle.data.gw.v2.index.get",
-                    "data": data_str,
-                }
-
-                await client.post(
-                    self.api_h5_tk,
-                    params=params,
-                    headers=self.headers,
-                    cookies=session.cookies,
-                )
-                return cookies
-            except httpx.ConnectTimeout:
-                logger.error("获取m_h5_tk时连接超时")
-                raise
-            except httpx.ReadTimeout:
-                logger.error("获取m_h5_tk时读取超时")
-                raise
-            except httpx.ConnectError:
-                logger.error("获取m_h5_tk时连接错误")
-                raise
+            # POST: 用签名确认会话
+            sign = hashlib.md5(f"{token}&{t}&{app_key}&{data_str}".encode()).hexdigest()
+            params = {
+                "jsv": "2.7.2", "appKey": app_key, "t": t, "sign": sign,
+                "v": "1.0", "type": "originaljson", "dataType": "json",
+                "timeout": 20000,
+                "api": "mtop.gaia.nodejs.gaia.idle.data.gw.v2.index.get",
+                "data": data_str,
+            }
+            resp2 = await client.post(
+                H5_TK_URL, params=params, headers=HEADERS, cookies=session.cookies
+            )
+            # POST 响应可能更新 m_h5_tk
+            post_cookies = {k: v for k, v in resp2.cookies.items()}
+            if post_cookies:
+                session.cookies.update(post_cookies)
+                logger.info(f"_get_mh5tk POST: 更新了 {len(post_cookies)} 个 Cookie")
+            logger.info(f"_get_mh5tk 完成: session.cookies keys=[{session.cookie_keys()}]")
 
     async def _get_login_params(self, session: QRLoginSession) -> Dict[str, Any]:
-        """获取二维码登录时需要的表单参数"""
+        """从登录页 HTML 中提取表单参数"""
         params = {
-            "lang": "zh_cn",
-            "appName": "xianyu",
-            "appEntrance": "web",
-            "styleType": "vertical",
-            "bizParams": "",
-            "notLoadSsoView": False,
-            "notKeepLogin": False,
-            "isMobile": False,
-            "qrCodeFirst": False,
-            "stie": 77,
-            "rnd": random(),
+            "lang": "zh_cn", "appName": "xianyu", "appEntrance": "web",
+            "styleType": "vertical", "bizParams": "",
+            "notLoadSsoView": False, "notKeepLogin": False,
+            "isMobile": False, "qrCodeFirst": False, "stie": 77, "rnd": random(),
         }
 
         async with httpx.AsyncClient(
             follow_redirects=True, timeout=self.timeout, proxy=self.proxy
         ) as client:
+            resp = await client.get(
+                f"{PASSPORT_HOST}/mini_login.htm",
+                params=params, cookies=session.cookies, headers=HEADERS,
+            )
+            # 登录页可能返回新的 Cookie
+            page_cookies = {k: v for k, v in resp.cookies.items()}
+            if page_cookies:
+                session.cookies.update(page_cookies)
+                logger.info(f"_get_login_params: 页面返回了 {len(page_cookies)} 个 Cookie")
+
+            match = re.search(r"window\.viewData\s*=\s*(\{.*?\});", resp.text)
+            if not match:
+                raise GetLoginParamsError("获取登录参数失败：未找到 viewData")
+
+            view_data = json.loads(match.group(1))
+            login_form = view_data.get("loginFormData")
+            if not login_form:
+                raise GetLoginParamsError("获取登录参数失败：未找到 loginFormData")
+
+            login_form["umidTag"] = "SERVER"
+            session.params.update(login_form)
+
+    async def _monitor_qr_status(self, session_id: str):
+        """后台监控二维码状态"""
+        session = self.sessions.get(session_id)
+        if not session:
+            return
+
+        logger.info(f"[{session_id[:8]}] 开始监控二维码状态")
+        start_time = time.time()
+        poll_count = 0
+
+        while time.time() - start_time < 300:
             try:
-                resp = await client.get(
-                    self.api_mini_login,
-                    params=params,
-                    cookies=session.cookies,
-                    headers=self.headers,
+                if session_id not in self.sessions:
+                    break
+
+                poll_count += 1
+
+                async with httpx.AsyncClient(
+                    follow_redirects=True, timeout=self.timeout
+                ) as client:
+                    resp = await client.post(
+                        f"{PASSPORT_HOST}/newlogin/qrcode/query.do",
+                        data=session.params,
+                        cookies=session.cookies,
+                        headers=HEADERS,
+                    )
+                    result = resp.json()
+
+                qr_status = (
+                    result.get("content", {}).get("data", {}).get("qrCodeStatus")
                 )
 
-                pattern = r"window\.viewData\s*=\s*(\{.*?\});"
-                match = re.search(pattern, resp.text)
-                if match:
-                    json_string = match.group(1)
-                    view_data = json.loads(json_string)
-                    data = view_data.get("loginFormData")
-                    if data:
-                        data["umidTag"] = "SERVER"
-                        session.params.update(data)
-                        return data
+                if poll_count % 10 == 1:
+                    logger.info(f"[{session_id[:8]}] 轮询#{poll_count}: status={qr_status}")
+
+                if qr_status == "CONFIRMED":
+                    data = result.get("content", {}).get("data", {})
+                    logger.info(f"[{session_id[:8]}] 扫码确认! iframeRedirect={data.get('iframeRedirect')}")
+
+                    if data.get("iframeRedirect") is True:
+                        session.status = "verification_required"
+                        session.verification_url = data.get("iframeRedirectUrl")
+                        logger.warning(f"[{session_id[:8]}] 风控拦截，需要验证: {session.verification_url}")
                     else:
-                        raise GetLoginParamsError("未找到loginFormData")
-                else:
-                    raise GetLoginParamsError("获取登录参数失败")
-            except httpx.ConnectTimeout:
-                logger.error("获取登录参数时连接超时")
-                raise
-            except httpx.ReadTimeout:
-                logger.error("获取登录参数时读取超时")
-                raise
-            except httpx.ConnectError:
-                logger.error("获取登录参数时连接错误")
-                raise
+                        # 登录成功：从 query.do 响应中提取 Cookie，**合并**到已有 Cookie 中
+                        resp_cookies = {k: v for k, v in resp.cookies.items()}
+                        logger.info(f"[{session_id[:8]}] query.do 响应 Cookie: {list(resp_cookies.keys())}")
+
+                        # 合并而非覆盖：保留 m_h5_tk 等早期获取的 Cookie
+                        for k, v in resp_cookies.items():
+                            session.cookies[k] = v
+                            if k == "unb":
+                                session.unb = v
+
+                        m_h5_tk = session.cookies.get("_m_h5_tk", "") or session.cookies.get("m_h5_tk", "")
+                        logger.info(
+                            f"[{session_id[:8]}] 登录成功: unb={session.unb}, "
+                            f"m_h5_tk={'有' if m_h5_tk else '缺失!'}, "
+                            f"cookie keys=[{session.cookie_keys()}]"
+                        )
+                        session.status = "success"
+                    break
+
+                elif qr_status == "SCANED":
+                    if session.status == "waiting":
+                        session.status = "scanned"
+                        logger.info(f"[{session_id[:8]}] 已扫码，等待确认")
+
+                elif qr_status == "EXPIRED":
+                    session.status = "expired"
+                    logger.info(f"[{session_id[:8]}] 二维码已过期")
+                    break
+
+                elif qr_status is None or qr_status not in ("NEW", "SCANED"):
+                    session.status = "cancelled"
+                    logger.info(f"[{session_id[:8]}] 登录取消，qr_status={qr_status}")
+                    break
+
+                await asyncio.sleep(0.8)
+
+            except Exception as e:
+                logger.warning(f"[{session_id[:8]}] 轮询异常: {e}")
+                await asyncio.sleep(2)
+
+        if session.status not in ("success", "expired", "cancelled", "verification_required"):
+            session.status = "expired"
+            logger.info(f"[{session_id[:8]}] 监控超时，标记过期")
+
+    # ==================== 公开接口 ====================
 
     async def generate_qr_code(self) -> Dict[str, Any]:
         """生成二维码"""
         try:
             session_id = str(uuid.uuid4())
             session = QRLoginSession(session_id)
+            logger.info(f"[{session_id[:8]}] 开始生成二维码")
 
+            # 步骤 1: 获取 m_h5_tk
             await self._get_mh5tk(session)
-            logger.info(f"获取m_h5_tk成功: {session_id}")
+            logger.info(f"[{session_id[:8]}] 步骤1完成 - Cookie: [{session.cookie_keys()}]")
 
+            # 步骤 2: 获取登录表单参数
             await self._get_login_params(session)
-            logger.info(f"获取登录参数成功: {session_id}")
+            logger.info(f"[{session_id[:8]}] 步骤2完成 - params keys: {list(session.params.keys())}")
 
+            # 步骤 3: 请求生成二维码
             async with httpx.AsyncClient(
-                follow_redirects=True, timeout=self.timeout, proxy=self.proxy
+                follow_redirects=True, timeout=self.timeout
             ) as client:
                 resp = await client.get(
-                    self.api_generate_qr, params=session.params, headers=self.headers
+                    f"{PASSPORT_HOST}/newlogin/qrcode/generate.do",
+                    params=session.params, headers=HEADERS,
                 )
+                results = resp.json()
 
-                try:
-                    results = resp.json()
-                except Exception:
-                    logger.exception("二维码接口返回不是JSON")
-                    raise GetLoginQRCodeError(f"二维码接口返回异常: {resp.text}")
+                if results.get("content", {}).get("success") is not True:
+                    logger.error(f"[{session_id[:8]}] 二维码接口返回失败")
+                    return {"success": False, "message": "获取登录二维码失败"}
 
-                if results.get("content", {}).get("success") is True:
-                    session.params.update(
-                        {
-                            "t": results["content"]["data"]["t"],
-                            "ck": results["content"]["data"]["ck"],
-                        }
-                    )
+                data = results["content"]["data"]
+                session.params.update({"t": data["t"], "ck": data["ck"]})
+                session.qr_content = data["codeContent"]
 
-                    qr_content = results["content"]["data"]["codeContent"]
-                    session.qr_content = qr_content
+                qr = qrcode.QRCode(
+                    version=5,
+                    error_correction=qrcode.constants.ERROR_CORRECT_L,
+                    box_size=10, border=2,
+                )
+                qr.add_data(session.qr_content)
+                qr.make()
+                buffer = BytesIO()
+                qr.make_image().save(buffer, format="PNG")
+                qr_base64 = base64.b64encode(buffer.getvalue()).decode()
+                session.qr_code_url = f"data:image/png;base64,{qr_base64}"
+                session.status = "waiting"
 
-                    qr = qrcode.QRCode(
-                        version=5,
-                        error_correction=qrcode.constants.ERROR_CORRECT_L,
-                        box_size=10,
-                        border=2,
-                    )
-                    qr.add_data(qr_content)
-                    qr.make()
+                self.sessions[session_id] = session
+                asyncio.create_task(self._monitor_qr_status(session_id))
 
-                    qr_img = qr.make_image()
-                    buffer = BytesIO()
-                    qr_img.save(buffer, format="PNG")
-                    qr_base64 = base64.b64encode(buffer.getvalue()).decode()
-                    qr_data_url = f"data:image/png;base64,{qr_base64}"
-
-                    session.qr_code_url = qr_data_url
-                    session.status = "waiting"
-
-                    self.sessions[session_id] = session
-                    asyncio.create_task(self._monitor_qr_status(session_id))
-
-                    logger.info(f"二维码生成成功: {session_id}")
-                    return {
-                        "success": True,
-                        "session_id": session_id,
-                        "qr_code_url": qr_data_url,
-                    }
-                else:
-                    raise GetLoginQRCodeError("获取登录二维码失败")
+                logger.info(f"[{session_id[:8]}] 二维码生成成功，开始监控")
+                return {
+                    "success": True,
+                    "session_id": session_id,
+                    "qr_code_url": session.qr_code_url,
+                }
 
         except httpx.ConnectTimeout as e:
             logger.error(f"连接超时: {e}")
@@ -278,107 +323,6 @@ class QRLoginManager:
         except Exception as e:
             logger.exception("二维码生成过程中发生异常")
             return {"success": False, "message": f"生成二维码失败: {str(e)}"}
-
-    async def _poll_qrcode_status(self, session: QRLoginSession) -> httpx.Response:
-        """获取二维码扫描状态"""
-        async with httpx.AsyncClient(
-            follow_redirects=True, timeout=self.timeout, proxy=self.proxy
-        ) as client:
-            resp = await client.post(
-                self.api_scan_status,
-                data=session.params,
-                cookies=session.cookies,
-                headers=self.headers,
-            )
-            return resp
-
-    async def _monitor_qr_status(self, session_id: str):
-        """监控二维码状态"""
-        try:
-            session = self.sessions.get(session_id)
-            if not session:
-                return
-
-            logger.info(f"开始监控二维码状态: {session_id}")
-            max_wait_time = 300
-            start_time = time.time()
-
-            while time.time() - start_time < max_wait_time:
-                try:
-                    if session_id not in self.sessions:
-                        break
-
-                    resp = await self._poll_qrcode_status(session)
-                    qrcode_status = (
-                        resp.json()
-                        .get("content", {})
-                        .get("data", {})
-                        .get("qrCodeStatus")
-                    )
-
-                    if qrcode_status == "CONFIRMED":
-                        if (
-                            resp.json()
-                            .get("content", {})
-                            .get("data", {})
-                            .get("iframeRedirect")
-                            is True
-                        ):
-                            session.status = "verification_required"
-                            iframe_url = (
-                                resp.json()
-                                .get("content", {})
-                                .get("data", {})
-                                .get("iframeRedirectUrl")
-                            )
-                            session.verification_url = iframe_url
-                            logger.warning(
-                                f"账号被风控，需要手机验证: {session_id}, URL: {iframe_url}"
-                            )
-                            break
-                        else:
-                            session.status = "success"
-                            for k, v in resp.cookies.items():
-                                session.cookies[k] = v
-                                if k == "unb":
-                                    session.unb = v
-                            logger.info(f"扫码登录成功: {session_id}, UNB: {session.unb}")
-                            break
-
-                    elif qrcode_status == "NEW":
-                        pass
-                    elif qrcode_status == "EXPIRED":
-                        session.status = "expired"
-                        logger.info(f"二维码已过期: {session_id}")
-                        break
-                    elif qrcode_status == "SCANED":
-                        if session.status == "waiting":
-                            session.status = "scanned"
-                            logger.info(f"二维码已扫描，等待确认: {session_id}")
-                    else:
-                        session.status = "cancelled"
-                        logger.info(f"用户取消登录: {session_id}")
-                        break
-
-                    await asyncio.sleep(0.8)
-
-                except Exception as e:
-                    logger.error(f"监控二维码状态异常: {e}")
-                    await asyncio.sleep(2)
-
-            if session.status not in [
-                "success",
-                "expired",
-                "cancelled",
-                "verification_required",
-            ]:
-                session.status = "expired"
-                logger.info(f"二维码监控超时，标记为过期: {session_id}")
-
-        except Exception as e:
-            logger.error(f"监控二维码状态失败: {e}")
-            if session_id in self.sessions:
-                self.sessions[session_id].status = "expired"
 
     def get_session_status(self, session_id: str) -> Dict[str, Any]:
         """获取会话状态"""
@@ -396,7 +340,14 @@ class QRLoginManager:
             result["message"] = "账号被风控，需要手机验证"
 
         if session.status == "success" and session.cookies and session.unb:
-            result["cookies"] = self._cookie_marshal(session.cookies)
+            cookie_str = self._cookie_marshal(session.cookies)
+            m_h5_tk = session.cookies.get("_m_h5_tk", "") or session.cookies.get("m_h5_tk", "")
+            logger.info(
+                f"[{session_id[:8]}] 返回 Cookie: {len(session.cookies)} 个, "
+                f"m_h5_tk={'有' if m_h5_tk else '缺失!'}, unb={session.unb}, "
+                f"keys=[{session.cookie_keys()}]"
+            )
+            result["cookies"] = cookie_str
             result["unb"] = session.unb
 
         return result

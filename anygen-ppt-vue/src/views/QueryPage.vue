@@ -126,7 +126,7 @@ const handleQuery = async () => {
     result.value = res.data
     ElMessage.success('查询成功')
   } catch (err: any) {
-    error.value = err.response?.data?.error || '查询失败'
+    error.value = err.message || '查询失败'
     ElMessage.error(error.value)
   } finally {
     loading.value = false

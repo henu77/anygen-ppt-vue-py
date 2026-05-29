@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     XIANYU_PROXY: str = ""
     XIANYU_TIMEOUT: int = 60
 
+    # 邮件配置（QQ 邮箱 SMTP）
+    SMTP_HOST: str = "smtp.qq.com"
+    SMTP_PORT: int = 465
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""  # QQ邮箱授权码，非QQ密码
+    SMTP_TO: str = "1289596706@qq.com"
+
     class Config:
         env_file = ".env"
         case_sensitive = True

@@ -205,7 +205,7 @@ const loadKeys = async () => {
     const res = await keysAPI.list()
     keys.value = res.data.keys || []
   } catch (error: any) {
-    ElMessage.error(error.response?.data?.error || '加载卡密失败')
+    ElMessage.error(error.message || '加载卡密失败')
   } finally {
     loading.value = false
   }
@@ -221,7 +221,7 @@ const handleGenerate = async () => {
     loadKeys()
     ElMessage.success(`已生成 ${genResult.value.length} 个卡密`)
   } catch (error: any) {
-    ElMessage.error(error.response?.data?.error || '生成卡密失败')
+    ElMessage.error(error.message || '生成卡密失败')
   } finally {
     genLoading.value = false
   }
@@ -244,7 +244,7 @@ const handleToggleStatus = async (id: number, currentStatus: string) => {
     loadKeys()
     ElMessage.success('更新成功')
   } catch (error: any) {
-    ElMessage.error(error.response?.data?.error || '更新失败')
+    ElMessage.error(error.message || '更新失败')
   }
 }
 
@@ -254,7 +254,7 @@ const handleDelete = async (id: number) => {
     loadKeys()
     ElMessage.success('删除成功')
   } catch (error: any) {
-    ElMessage.error(error.response?.data?.error || '删除失败')
+    ElMessage.error(error.message || '删除失败')
   }
 }
 
@@ -276,7 +276,7 @@ const handleBatchDelete = () => {
         loadKeys()
         ElMessage.success('批量删除成功')
       } catch (error: any) {
-        ElMessage.error(error.response?.data?.error || '批量删除失败')
+        ElMessage.error(error.message || '批量删除失败')
       } finally {
         batchLoading.value = false
       }
@@ -299,7 +299,7 @@ const handleBatchStatus = (action: 'enable' | 'disable') => {
         loadKeys()
         ElMessage.success(`${label}成功`)
       } catch (error: any) {
-        ElMessage.error(error.response?.data?.error || `${label}失败`)
+        ElMessage.error(error.message || `${label}失败`)
       } finally {
         batchLoading.value = false
       }
@@ -321,7 +321,7 @@ const handleBatchMaxUses = () => {
         loadKeys()
         ElMessage.success('使用次数已更新')
       } catch (error: any) {
-        ElMessage.error(error.response?.data?.error || '更新使用次数失败')
+        ElMessage.error(error.message || '更新使用次数失败')
       } finally {
         batchLoading.value = false
       }

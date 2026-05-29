@@ -30,6 +30,7 @@ class XianyuAccountResponse(BaseModel):
     id: int
     account_id: str
     unb: Optional[str] = None
+    nickname: Optional[str] = None
     delivery_template: Optional[str] = None
     status: str
     created_at: Optional[str] = None
@@ -43,6 +44,7 @@ class XianyuAccountListResponse(BaseModel):
 class BindAccountRequest(BaseModel):
     accountId: str
     cookies: str
+    nickname: Optional[str] = None
 
 
 class UnbindAccountRequest(BaseModel):
