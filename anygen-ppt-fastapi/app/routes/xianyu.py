@@ -1,4 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import Request
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.database.db import get_db
 from app.schemas.xianyu import (
@@ -90,7 +92,7 @@ async def verify_cookies(
     db: Session = Depends(get_db),
 ):
     """验证 cookies 是否有效"""
-    result = await xianyu_client.verify_cookies(request.cookies)
+    result, updated_cookies = await xianyu_client.verify_cookies(request.cookies)
     if not result.get("valid"):
         raise HTTPException(status_code=400, detail=result.get("message", "Cookies 无效"))
     return ok(data={
@@ -116,6 +118,8 @@ async def list_accounts(
             "nickname": acc.nickname,
             "delivery_template": acc.delivery_template,
             "status": acc.status,
+            "auto_delivery": acc.auto_delivery,
+            "auto_item_id": acc.auto_item_id,
             "created_at": acc.created_at.isoformat() if acc.created_at else None,
             "updated_at": acc.updated_at.isoformat() if acc.updated_at else None,
         }
@@ -237,9 +241,14 @@ async def get_sold_orders(
     if not account.cookies:
         raise HTTPException(status_code=400, detail="账户无Cookie")
 
-    result = await xianyu_client.fetch_sold_orders(account.cookies, page=page, page_size=pageSize)
+    result, updated_cookies = await xianyu_client.fetch_sold_orders(account.cookies, page=page, page_size=pageSize)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "获取订单失败"))
+
+    # 如果 Set-Cookie 更新了 token，持久化到数据库
+    if updated_cookies != account.cookies:
+        account.cookies = updated_cookies
+        db.commit()
 
     return ok(data={
         "items": result["items"],
@@ -262,9 +271,14 @@ async def get_order_detail(
     if not account.cookies:
         raise HTTPException(status_code=400, detail="账户无Cookie")
 
-    result = await xianyu_client.fetch_order_detail(account.cookies, order_id)
+    result, updated_cookies = await xianyu_client.fetch_order_detail(account.cookies, order_id)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "获取订单详情失败"))
+
+    # 如果 Set-Cookie 更新了 token，持久化到数据库
+    if updated_cookies != account.cookies:
+        account.cookies = updated_cookies
+        db.commit()
 
     return ok(data=result["detail"])
 
@@ -309,3 +323,82 @@ async def confirm_delivery(
     acc_name = account.nickname if account else "-"
     logger.info(f"[{acc_name or '-'}] 确认发货: {order_no} (账户: {order.account_id})")
     return ok(message="发货确认成功")
+
+
+# ── 自动发货相关接口 ──────────────────────────────────────
+
+
+class AutoDeliveryRequest(BaseModel):
+    accountId: str
+    autoDelivery: bool
+    autoItemId: str | None = None
+
+
+@router.put("/xianyu-multi/auto-delivery")
+async def update_auto_delivery(
+    body: AutoDeliveryRequest,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(verify_admin),
+    fastapi_request: Request = None,
+):
+    """更新自动发货配置"""
+    account = XianyuService.get_account(db, body.accountId)
+    if not account:
+        raise HTTPException(status_code=404, detail="账户不存在")
+
+    account.auto_delivery = body.autoDelivery
+    if body.autoItemId is not None:
+        account.auto_item_id = body.autoItemId
+    db.commit()
+    db.refresh(account)
+
+    # 动态管理 Worker
+    live_manager = fastapi_request.app.state.live_manager if fastapi_request else None
+    if live_manager:
+        if body.autoDelivery and account.status == "active":
+            await live_manager.add_account(body.accountId)
+        else:
+            await live_manager.remove_account(body.accountId)
+
+    logger.info(f"[{account.nickname or '-'}] 自动发货: {'开启' if body.autoDelivery else '关闭'}, 商品: {body.autoItemId or '全部'}")
+    return ok(data=account.to_dict())
+
+
+@router.get("/xianyu/items")
+async def get_listed_items(
+    accountId: str,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(verify_admin),
+):
+    """获取在售商品列表"""
+    account = XianyuService.get_account(db, accountId)
+    if not account:
+        raise HTTPException(status_code=404, detail="账户不存在")
+    if not account.cookies:
+        raise HTTPException(status_code=400, detail="账户无 Cookie")
+
+    result, updated_cookies = await xianyu_client.fetch_listed_items(account.cookies, account.account_id)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "获取商品失败"))
+
+    # 如果 Set-Cookie 更新了 token，持久化到数据库
+    if updated_cookies != account.cookies:
+        account.cookies = updated_cookies
+        db.commit()
+
+    return ok(data={"items": result["items"]})
+
+
+@router.get("/xianyu/pending-orders")
+async def get_pending_orders(
+    accountId: str = None,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(verify_admin),
+):
+    """获取待处理订单（无卡密跳过的）"""
+    from app.models.xianyu import XianyuOrder
+    query = db.query(XianyuOrder).filter(XianyuOrder.status == "pending_key")
+    if accountId:
+        query = query.filter(XianyuOrder.account_id == accountId)
+    orders = query.order_by(XianyuOrder.id.desc()).limit(100).all()
+    return ok(data={"orders": [o.to_dict() for o in orders]})

@@ -1,15 +1,11 @@
 import httpx
 import json
+import re
 import time
 import hashlib
 from config import settings
 from loguru import logger
-import sys
-import os
-
-# 添加上级目录到路径，以便导入 manager
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from manager import QRLoginManager
+from app.utils.qr_login import QRLoginManager
 
 
 def _get_h5_tk_token(cookies_str: str) -> str:
@@ -20,6 +16,28 @@ def _get_h5_tk_token(cookies_str: str) -> str:
             value = part.split("=", 1)[1]
             return value.split("_")[0] if "_" in value else value
     return ""
+
+
+def _merge_cookies(original: str, new_cookies: dict) -> str:
+    """将 Set-Cookie 中的新字段合并到现有 Cookie 字符串"""
+    existing = {}
+    for part in original.split(";"):
+        part = part.strip()
+        if "=" in part:
+            k, v = part.split("=", 1)
+            existing[k.strip()] = v.strip()
+    existing.update(new_cookies)
+    return "; ".join(f"{k}={v}" for k, v in existing.items())
+
+
+def _extract_set_cookies(resp) -> dict:
+    """从 httpx Response 提取 Set-Cookie 头中的 cookie 键值对"""
+    result = {}
+    for header_value in resp.headers.get_list("set-cookie"):
+        if "=" in header_value:
+            name, value = header_value.split(";")[0].split("=", 1)
+            result[name.strip()] = value.strip()
+    return result
 
 
 class XianyuClient:
@@ -77,112 +95,164 @@ class XianyuClient:
         extra_params: dict = None,
         extra_headers: dict = None,
         referer: str = "https://www.goofish.com/",
-    ) -> dict:
-        """发起 mtop API 请求（参照 xianyu-api/xianyu_utils.py MtopClient）"""
-        timestamp = str(int(time.time() * 1000))
-        data_val = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
-        token = _get_h5_tk_token(cookies_str)
+    ) -> tuple[dict, str]:
+        """发起 mtop API 请求，自动处理 Set-Cookie 更新和令牌过期重试。
 
-        if not token:
-            logger.warning(f"mtop请求 [{api}]: _m_h5_tk 为空! Cookie前200字符: {cookies_str[:200]}")
-
-        app_key = "34839810"
-        sign = hashlib.md5(f"{token}&{timestamp}&{app_key}&{data_val}".encode()).hexdigest()
-
-        params = {
-            "jsv": "2.7.2",
-            "appKey": app_key,
-            "t": timestamp,
-            "sign": sign,
-            "v": version,
-            "type": type_,
-            "accountSite": "xianyu",
-            "dataType": "json",
-            "timeout": "20000",
-            "api": api,
-            "sessionOption": "AutoLoginOnly",
-        }
-        if extra_params:
-            params.update(extra_params)
-
-        headers = {
-            "accept": "application/json",
-            "content-type": "application/x-www-form-urlencoded",
-            "cookie": cookies_str,
-            "referer": referer,
-            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/138.0.0.0 Safari/537.36",
-        }
-        if extra_headers:
-            headers.update(extra_headers)
-
-        url = f"{self.H5API_BASE}/{api}/{version}/"
-
-        async with httpx.AsyncClient(
-            timeout=self.timeout, follow_redirects=True, proxy=self.proxy, trust_env=False
-        ) as client:
-            resp = await client.post(
-                url,
-                params=params,
-                data={"data": data_val},
-                headers=headers,
-            )
-            return resp.json()
-
-    async def verify_cookies(self, cookies: str) -> dict:
-        """验证 cookies 是否有效，通过 mtop loginuser.get 接口
-
-        使用 QR 登录时已获取的 _m_h5_tk 进行签名，直接调用 mtop 接口验证。
-        如果 token 过期则自动重试（MtopClient 模式）。
+        Returns: (json_response, updated_cookies_str)
         """
+        current_cookies = cookies_str
+        max_retry = 1  # 令牌过期最多重试1次
+
+        for attempt in range(max_retry + 1):
+            timestamp = str(int(time.time() * 1000))
+            data_val = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+            token = _get_h5_tk_token(current_cookies)
+
+            if not token:
+                logger.warning(f"mtop请求 [{api}]: _m_h5_tk 为空! Cookie前200字符: {current_cookies[:200]}")
+
+            app_key = "34839810"
+            sign = hashlib.md5(f"{token}&{timestamp}&{app_key}&{data_val}".encode()).hexdigest()
+
+            params = {
+                "jsv": "2.7.2",
+                "appKey": app_key,
+                "t": timestamp,
+                "sign": sign,
+                "v": version,
+                "type": type_,
+                "accountSite": "xianyu",
+                "dataType": "json",
+                "timeout": "20000",
+                "api": api,
+                "sessionOption": "AutoLoginOnly",
+            }
+            if extra_params:
+                params.update(extra_params)
+
+            headers = {
+                "accept": "application/json",
+                "content-type": "application/x-www-form-urlencoded",
+                "cookie": current_cookies,
+                "referer": referer,
+                "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/138.0.0.0 Safari/537.36",
+            }
+            if extra_headers:
+                headers.update(extra_headers)
+
+            url = f"{self.H5API_BASE}/{api}/{version}/"
+
+            async with httpx.AsyncClient(
+                timeout=self.timeout, follow_redirects=True, proxy=self.proxy, trust_env=False
+            ) as client:
+                resp = await client.post(
+                    url,
+                    params=params,
+                    data={"data": data_val},
+                    headers=headers,
+                )
+
+            # 提取 Set-Cookie，更新本地 cookies（参照 websocket 端 _handle_response_cookies）
+            new_cookies = _extract_set_cookies(resp)
+            if new_cookies:
+                current_cookies = _merge_cookies(current_cookies, new_cookies)
+                logger.info(f"mtop [{api}] 从 Set-Cookie 更新了 {len(new_cookies)} 个字段")
+
+            result = resp.json()
+
+            # 令牌过期：用更新后的 cookies 重试
+            if attempt < max_retry:
+                ret = result.get("ret", [])
+                ret_str = ret[0] if ret else ""
+                if "FAIL_SYS_TOKEN_EXOIRED" in ret_str or "FAIL_SYS_TOKEN_EXPIRED" in ret_str:
+                    logger.info(f"mtop [{api}] 令牌过期，用新 token 重试 ({attempt + 1}/{max_retry})")
+                    continue
+
+            return result, current_cookies
+
+    async def verify_cookies(self, cookies: str) -> tuple[dict, str]:
+        """验证 cookies 是否有效，返回 (result_dict, updated_cookies)"""
         api = "mtop.taobao.idlemessage.pc.loginuser.get"
         version = "1.0"
         data = {"bizScene": "home"}
-        max_retry = 1
 
-        for attempt in range(max_retry + 1):
-            try:
-                result = await self._mtop_request(api, version, data, cookies)
+        try:
+            result, updated_cookies = await self._mtop_request(api, version, data, cookies)
 
-                ret = result.get("ret", [])
-                ret_str = ret[0] if ret else ""
-                logger.info(f"verify_cookies (attempt {attempt}): ret={ret_str}")
+            ret = result.get("ret", [])
+            ret_str = ret[0] if ret else ""
+            logger.info(f"verify_cookies: ret={ret_str}")
 
-                if "SUCCESS" in ret_str.upper():
-                    user_data = result.get("data", {})
-                    nickname = user_data.get("nickname") or user_data.get("userNick") or ""
-                    logger.info(f"[{nickname or '-'}] Cookies 验证有效")
-                    return {
-                        "valid": True,
-                        "message": "Cookies 有效",
-                        "nickname": nickname,
-                        "user_data": user_data,
-                    }
+            if "SUCCESS" in ret_str.upper():
+                user_data = result.get("data", {})
+                nickname = await self._get_user_nickname(updated_cookies)
+                logger.info(f"[{nickname or '-'}] Cookies 验证有效")
+                return {
+                    "valid": True,
+                    "message": "Cookies 有效",
+                    "nickname": nickname,
+                    "user_data": user_data,
+                }, updated_cookies
 
-                if "SESSION_EXPIRED" in ret_str:
-                    logger.warning(f"Cookies 已过期: {ret_str}")
-                    return {"valid": False, "message": "Cookies 已过期，请重新登录"}
+            if "SESSION_EXPIRED" in ret_str:
+                logger.warning(f"Cookies 已过期: {ret_str}")
+                return {"valid": False, "message": "Cookies 已过期，请重新登录"}, updated_cookies
 
-                # 令牌过期：重试（响应 Set-Cookie 可能包含新 token）
-                if attempt < max_retry and (
-                    "FAIL_SYS_TOKEN_EXOIRED" in ret_str
-                    or "FAIL_SYS_TOKEN_EXPIRED" in ret_str
-                ):
-                    logger.info(f"令牌过期，重试 ({attempt + 1}/{max_retry})")
-                    continue
+            logger.warning(f"Cookies 验证失败: {ret_str}")
+            return {"valid": False, "message": f"Cookies 无效: {ret_str}"}, updated_cookies
 
-                logger.warning(f"Cookies 验证失败: {ret_str}")
-                return {"valid": False, "message": f"Cookies 无效: {ret_str}"}
+        except Exception as e:
+            logger.error(f"Cookies 验证异常: {e}")
+            return {"valid": False, "message": f"验证失败: {str(e)}"}, cookies
 
-            except Exception as e:
-                logger.error(f"Cookies 验证异常 (attempt {attempt}): {e}")
-                if attempt < max_retry:
-                    continue
-                return {"valid": False, "message": f"验证失败: {str(e)}"}
+    async def _get_user_nickname(self, cookies_str: str) -> str:
+        """获取当前用户的昵称
 
-        return {"valid": False, "message": "Cookies 验证失败: 重试次数用尽"}
+        优先从 Cookie 的 tracknick 字段解码，失败则尝试 pc.user.query。
+        """
+        # 方式 1：从 tracknick cookie 提取（最可靠）
+        import urllib.parse
+        m = re.search(r"(?:^|;\s*)tracknick=([^;]+)", cookies_str)
+        if m:
+            nick = urllib.parse.unquote(m.group(1)).strip()
+            if nick:
+                logger.info(f"从 tracknick 获取昵称: {nick}")
+                return nick
 
-    async def fetch_sold_orders(self, cookies_str: str, page: int = 1, page_size: int = 30) -> dict:
-        """获取卖家已卖出的订单列表"""
+        # 方式 2：从 unb 尝试 pc.user.query（备用，通常对自己无效）
+        unb_match = re.search(r"(?:^|;\s*)unb=(\d+)", cookies_str)
+        if not unb_match:
+            logger.warning("获取昵称失败: Cookie 中未找到 unb 和 tracknick")
+            return ""
+        unb = unb_match.group(1)
+
+        data = {
+            "type": 0,
+            "sessionType": 1,
+            "sessionId": unb,
+            "isOwner": False,
+        }
+        try:
+            result, _ = await self._mtop_request(
+                api="mtop.taobao.idlemessage.pc.user.query",
+                version="4.0",
+                data=data,
+                cookies_str=cookies_str,
+                type_="originaljson",
+            )
+            ret = result.get("ret", [])
+            if any("SUCCESS" in r for r in ret):
+                user_info = result.get("data", {}).get("userInfo", {})
+                nickname = user_info.get("fishNick") or user_info.get("nick") or ""
+                logger.info(f"从 pc.user.query 获取昵称: {nickname or '(空)'}")
+                return nickname
+        except Exception as e:
+            logger.warning(f"获取用户昵称异常: {e}")
+
+        return ""
+
+    async def fetch_sold_orders(self, cookies_str: str, page: int = 1, page_size: int = 30) -> tuple[dict, str]:
+        """获取卖家已卖出的订单列表，返回 (result, updated_cookies)"""
         data = {
             "pageNumber": page,
             "rowsPerPage": page_size,
@@ -191,7 +261,7 @@ class XianyuClient:
             "orderSearchParam": "{}",
         }
         try:
-            result = await self._mtop_request(
+            result, updated_cookies = await self._mtop_request(
                 api="mtop.taobao.idle.trade.merchant.sold.get",
                 version="1.0",
                 data=data,
@@ -203,7 +273,7 @@ class XianyuClient:
             )
             ret = result.get("ret", [])
             if not any("SUCCESS" in r for r in ret):
-                return {"success": False, "error": ret[0] if ret else "未知错误", "items": []}
+                return {"success": False, "error": ret[0] if ret else "未知错误", "items": []}, updated_cookies
 
             module = result.get("data", {}).get("module", {})
             items = module.get("items", [])
@@ -227,16 +297,16 @@ class XianyuClient:
                     "buyer_id": buyer.get("buyerId", ""),
                 })
 
-            return {"success": True, "items": parsed, "total_count": total_count, "has_next": next_page}
+            return {"success": True, "items": parsed, "total_count": total_count, "has_next": next_page}, updated_cookies
         except Exception as e:
             logger.error(f"获取已卖出订单失败: {e}")
-            return {"success": False, "error": str(e), "items": []}
+            return {"success": False, "error": str(e), "items": []}, cookies_str
 
-    async def fetch_order_detail(self, cookies_str: str, order_id: str) -> dict:
-        """获取订单详情（含状态、收货地址、商品信息）"""
+    async def fetch_order_detail(self, cookies_str: str, order_id: str) -> tuple[dict, str]:
+        """获取订单详情，返回 (result, updated_cookies)"""
         data = {"tid": order_id}
         try:
-            result = await self._mtop_request(
+            result, updated_cookies = await self._mtop_request(
                 api="mtop.idle.web.trade.order.detail",
                 version="1.0",
                 data=data,
@@ -250,7 +320,7 @@ class XianyuClient:
             )
             ret = result.get("ret", [])
             if not any("SUCCESS" in r for r in ret):
-                return {"success": False, "error": ret[0] if ret else "未知错误"}
+                return {"success": False, "error": ret[0] if ret else "未知错误"}, updated_cookies
 
             components = result.get("data", {}).get("components", [])
             detail = {"order_id": order_id}
@@ -283,15 +353,113 @@ class XianyuClient:
             detail["peer_user_id"] = result.get("data", {}).get("peerUserId", "")
             detail["item_id"] = result.get("data", {}).get("itemId", "")
 
-            return {"success": True, "detail": detail}
+            return {"success": True, "detail": detail}, updated_cookies
         except Exception as e:
             logger.error(f"获取订单详情失败: {e}")
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": str(e)}, cookies_str
 
-    async def confirm_delivery(self, order_no: str, cookies: str) -> bool:
-        """确认发货"""
-        logger.info(f"确认发货: {order_no}")
-        return True
+    async def confirm_delivery(self, order_no: str, cookies: str) -> tuple[bool, str]:
+        """确认发货，返回 (success, updated_cookies)"""
+        return await self.confirm_delivery_api(cookies, order_no)
+
+    async def confirm_delivery_api(self, cookies_str: str, order_id: str) -> tuple[bool, str]:
+        """调用 consign.dummy 确认发货，返回 (success, updated_cookies)"""
+        data = {"orderId": order_id}
+        try:
+            result, updated_cookies = await self._mtop_request(
+                api="mtop.taobao.idle.logistic.consign.dummy",
+                version="1.0",
+                data=data,
+                cookies_str=cookies_str,
+                type_="originaljson",
+            )
+            ret = result.get("ret", [])
+            if any("SUCCESS" in r for r in ret):
+                logger.info(f"确认发货成功: {order_id}")
+                return True, updated_cookies
+            logger.warning(f"确认发货失败: {order_id}, ret={ret}")
+            return False, updated_cookies
+        except Exception as e:
+            logger.error(f"确认发货异常: {order_id}, {e}")
+            return False, cookies_str
+
+    async def get_im_token(self, cookies_str: str, user_id: str) -> tuple[str | None, str]:
+        """获取 IM Token，返回 (token_or_none, updated_cookies)"""
+        data = {
+            "appKey": "444e9908a51d1cb236a27862abc769c9",
+            "deviceId": f"web-{user_id}",
+            "userId": user_id,
+        }
+        try:
+            result, updated_cookies = await self._mtop_request(
+                api="mtop.taobao.idlemessage.pc.login.token",
+                version="1.0",
+                data=data,
+                cookies_str=cookies_str,
+                type_="originaljson",
+            )
+            ret = result.get("ret", [])
+            if any("SUCCESS" in r for r in ret):
+                token = result.get("data", {}).get("accessToken")
+                if token:
+                    logger.info(f"获取 IM Token 成功: {user_id}")
+                    return token, updated_cookies
+                logger.warning(f"获取 IM Token 响应中无 accessToken: {result.get('data')}")
+                return None, updated_cookies
+            logger.warning(f"获取 IM Token 失败: {ret}")
+            return None, updated_cookies
+        except Exception as e:
+            logger.error(f"获取 IM Token 异常: {e}")
+            return None, cookies_str
+
+    async def fetch_listed_items(self, cookies_str: str, user_id: str) -> tuple[dict, str]:
+        """获取在售商品列表，返回 (result, updated_cookies)"""
+        all_items = []
+        page = 1
+        page_size = 20
+        current_cookies = cookies_str
+
+        try:
+            while True:
+                data = {
+                    "userId": user_id,
+                    "pageNumber": page,
+                    "pageSize": page_size,
+                }
+                result, current_cookies = await self._mtop_request(
+                    api="mtop.idle.web.xyh.item.list",
+                    version="1.0",
+                    data=data,
+                    cookies_str=current_cookies,
+                    type_="json",
+                    extra_params={"type": "json", "valueType": "string"},
+                )
+                ret = result.get("ret", [])
+                if not any("SUCCESS" in r for r in ret):
+                    if page == 1:
+                        return {"success": False, "error": ret[0] if ret else "未知错误", "items": []}, current_cookies
+                    break
+
+                module = result.get("data", {}).get("module", {})
+                items = module.get("items", [])
+                for item in items:
+                    all_items.append({
+                        "item_id": item.get("itemId", ""),
+                        "title": item.get("title", ""),
+                        "price": item.get("price", ""),
+                        "pic_url": item.get("picUrl", ""),
+                        "status": item.get("status", ""),
+                    })
+
+                has_next = module.get("hasNext", False) or module.get("nextPage", "false") == "true"
+                if not has_next or not items:
+                    break
+                page += 1
+
+            return {"success": True, "items": all_items}, current_cookies
+        except Exception as e:
+            logger.error(f"获取在售商品失败: {e}")
+            return {"success": False, "error": str(e), "items": []}, current_cookies
 
     def cleanup_expired_sessions(self):
         """清理过期会话"""
