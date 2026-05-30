@@ -11,8 +11,8 @@
             <el-input-number v-model="genForm.maxUses" :min="1" :max="9999" />
           </el-form-item>
           <el-form-item label="超级卡密">
-            <el-checkbox v-model="genForm.isSuper" />
-            <span class="ml-2 text-xs text-gray-500">不计入用户配额</span>
+            <el-checkbox v-model="genForm.isSuper" @change="onSuperChange" />
+            <span class="ml-2 text-xs text-gray-500">不扣使用次数</span>
           </el-form-item>
         </el-form>
       </div>
@@ -24,20 +24,17 @@
 
     <!-- 生成结果显示 -->
     <el-dialog v-model="showResultDialog" title="生成成功" width="600px">
-      <div class="space-y-3">
-        <el-alert type="success" title="卡密已生成" :closable="false" />
-        <div class="bg-gray-50 p-4 rounded-lg border max-h-60 overflow-y-auto">
-          <div v-for="(key, idx) in genResult" :key="idx" class="font-mono text-sm py-1">
-            {{ key }}
-          </div>
+      <div class="bg-gray-50 p-4 rounded-lg border max-h-60 overflow-y-auto">
+        <div v-for="(key, idx) in genResult" :key="idx" class="font-mono text-sm py-1">
+          {{ key }}
         </div>
-        <el-button type="primary" @click="copyKeys" style="width: 100%">
-          <el-icon><DocumentCopy /></el-icon>
-          复制全部
-        </el-button>
       </div>
       <template #footer>
         <el-button @click="showResultDialog = false">关闭</el-button>
+        <el-button type="primary" @click="copyKeys">
+          <el-icon><DocumentCopy /></el-icon>
+          复制全部
+        </el-button>
       </template>
     </el-dialog>
 
@@ -195,6 +192,11 @@ const genForm = ref<GenForm>({
   isSuper: false,
 })
 
+// 勾选超级卡密时自动设为 99999
+const onSuperChange = (val: boolean) => {
+  if (val) genForm.value.maxUses = 99999
+}
+
 const formatTime = (time: string) => {
   return new Date(time).toLocaleString('zh-CN')
 }
@@ -215,7 +217,7 @@ const handleGenerate = async () => {
   genLoading.value = true
   try {
     const res = await keysAPI.create(genForm.value.count, genForm.value.maxUses, genForm.value.isSuper)
-    genResult.value = res.data.keys || []
+    genResult.value = (res.data.keys || []).map((k: any) => k.key)
     showGenDialog.value = false
     showResultDialog.value = true
     loadKeys()

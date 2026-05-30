@@ -144,6 +144,12 @@ export const xianyuMultiAPI = {
     apiClient.get('/api/xianyu-multi/orders', { params: { accountId, status } }),
   relogin: (accountId: string, cookies: string, nickname?: string) =>
     apiClient.post('/api/xianyu-multi/relogin', { accountId, cookies, nickname }),
+  updateAutoDelivery: (accountId: string, autoDelivery: boolean, autoItemId?: string) =>
+    apiClient.put('/api/xianyu-multi/auto-delivery', { accountId, autoDelivery, autoItemId }),
+  getListedItems: (accountId: string) =>
+    apiClient.get('/api/xianyu/items', { params: { accountId } }),
+  getPendingOrders: (accountId?: string) =>
+    apiClient.get('/api/xianyu/pending-orders', { params: { accountId } }),
 }
 
 // 定时任务相关

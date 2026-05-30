@@ -64,15 +64,14 @@
       <!-- Error Alert -->
       <el-alert
         v-if="error"
-        :title="error"
         type="error"
         :closable="true"
         class="result-alert"
         @close="error = ''"
       >
-        <template #default>
+        <template #title>
           <div class="alert-content">
-            <p>{{ error }}</p>
+            <span>{{ error }}</span>
             <el-button type="danger" link @click="handleRetry">一键重试</el-button>
           </div>
         </template>

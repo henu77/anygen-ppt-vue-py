@@ -89,10 +89,51 @@
           </div>
 
           <!-- 自动发货状态 -->
-          <div class="auto-delivery-status mt-4">
-            <el-tag :type="account.auto_delivery ? 'success' : 'info'">
-              {{ account.auto_delivery ? '✓ 自动发货已启用' : '○ 自动发货未启用' }}
-            </el-tag>
+          <div class="auto-delivery-section mt-4">
+            <div class="flex items-center justify-between mb-3">
+              <span class="info-label">自动发货</span>
+              <el-switch
+                v-model="account.auto_delivery"
+                :active-value="true"
+                :inactive-value="false"
+                @change="(val) => toggleAutoDelivery(account, val)"
+                :disabled="account.status !== 'active'"
+              />
+            </div>
+
+            <div v-if="account.auto_delivery" class="auto-delivery-config">
+              <div class="mb-2">
+                <span class="info-label">发货商品</span>
+              </div>
+              <el-select
+                v-model="account.auto_item_id"
+                placeholder="选择自动发货的商品"
+                clearable
+                filterable
+                style="width: 100%"
+                :loading="account._itemsLoading"
+                @visible-change="(visible) => visible && loadItems(account)"
+              >
+                <el-option
+                  v-for="item in (account._items || [])"
+                  :key="item.item_id"
+                  :label="item.title"
+                  :value="item.item_id"
+                >
+                  <span>{{ item.title }}</span>
+                  <span style="float: right; color: #8492a6; font-size: 12px">¥{{ item.price }}</span>
+                </el-option>
+              </el-select>
+              <el-button
+                type="primary"
+                size="small"
+                class="mt-2"
+                @click="saveAutoDelivery(account)"
+                :loading="account._saving"
+              >
+                保存配置
+              </el-button>
+            </div>
           </div>
         </div>
       </el-card>
@@ -213,9 +254,21 @@ interface Account {
   error_msg: string | null
   reply_template: string
   delivery_template: string
-  auto_delivery: number
+  auto_delivery: boolean
+  auto_item_id: string | null
   created_at: string
   updated_at: string
+  _items?: ListedItem[]
+  _itemsLoading?: boolean
+  _saving?: boolean
+}
+
+interface ListedItem {
+  item_id: string
+  title: string
+  price: string
+  pic_url: string
+  status: string
 }
 
 interface Order {
@@ -450,6 +503,51 @@ const cancelRelogin = () => {
   reloginStep.value = 0
 }
 
+// ── 自动发货 ──────────────────────────────────────────────
+
+const toggleAutoDelivery = async (account: Account, val: boolean) => {
+  try {
+    await xianyuMultiAPI.updateAutoDelivery(account.account_id, val, account.auto_item_id || undefined)
+    message.value = val ? '自动发货已开启' : '自动发货已关闭'
+    messageType.value = 'success'
+    refreshAccounts()
+  } catch (err: any) {
+    // 回滚 UI 状态
+    account.auto_delivery = !val
+    message.value = err.message || '操作失败'
+    messageType.value = 'error'
+  }
+}
+
+const loadItems = async (account: Account) => {
+  if (account._items && account._items.length > 0) return
+  account._itemsLoading = true
+  try {
+    const res = await xianyuMultiAPI.getListedItems(account.account_id)
+    account._items = res.data?.items || []
+  } catch (err: any) {
+    ElMessage.error(err.message || '获取商品列表失败')
+    account._items = []
+  } finally {
+    account._itemsLoading = false
+  }
+}
+
+const saveAutoDelivery = async (account: Account) => {
+  account._saving = true
+  try {
+    await xianyuMultiAPI.updateAutoDelivery(account.account_id, account.auto_delivery, account.auto_item_id || undefined)
+    message.value = '自动发货配置已保存'
+    messageType.value = 'success'
+    refreshAccounts()
+  } catch (err: any) {
+    message.value = err.message || '保存失败'
+    messageType.value = 'error'
+  } finally {
+    account._saving = false
+  }
+}
+
 onMounted(() => {
   refreshAccounts()
 })
@@ -523,9 +621,14 @@ onMounted(() => {
   margin-top: 12px;
 }
 
-.auto-delivery-status {
-  display: flex;
-  justify-content: center;
+.auto-delivery-section {
+  padding: 12px;
+  background: #f8f9fa;
+  border-radius: 6px;
+}
+
+.auto-delivery-config {
+  margin-top: 8px;
 }
 
 .empty-state {
