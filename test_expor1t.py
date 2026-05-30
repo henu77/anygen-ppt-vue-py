@@ -2,29 +2,35 @@
 AnyGen PPTX 自动导出脚本（优化版）
 
 流程：
-  1. 用 Playwright 打开登录页，自动获取最新 Cookie（含 _csrf_token）
+  1. 用 Playwright 打开页面，自动获取 Cookie（如本地已有则跳过）
   2. 请求 /api/page/file_system/{PAGE_ID}/files，动态推断 PPT 页数
-  3. Playwright 打开编辑页面，注入统一 Cookie
-  4. 扫 React Fiber，等待 editor.getClientVars() 稳定后抓取 export client_vars
-  5. POST export-jobs 创建导出任务（_csrf_token 单独传 Header）
-  6. 轮询任务状态（指数退避）
-  7. 下载 PPTX 并校验合法性
+  3. 在同一个 Playwright 上下文中注入 Cookie，等待 editor 加载后抓取 export client_vars
+     ↑ 步骤 1/3 合并为一次浏览器启动，节省 5–15 秒
+  4. POST export-jobs 创建导出任务（需要单独的 csrf_cookie，含 _csrf_token）
+  5. 轮询任务状态（区分 4xx/5xx 重试策略 + 进行中加速轮询）
+  6. 下载 PPTX 并校验合法性
+
+优化说明（相较原版）：
+  - Playwright 只启动一次：Cookie 获取与 client_vars 抓取复用同一 context
+  - retry_request 区分可重试（5xx/网络）和不可重试（4xx）错误
+  - poll_export_job 在进行中阶段加速轮询，排队阶段才退避
+  - get_client_vars 中去除无效的 min_block_count 初始计算
+  - requests / Playwright 统一使用同一个 User-Agent 字符串
+  - 代码结构：acquire_cookie_via_browser 与 get_client_vars 合并为
+    acquire_cookie_and_client_vars，单次浏览器生命周期内完成两件事
 
 依赖安装：
   pip install playwright requests
   python -m playwright install chromium
 
 Cookie 说明：
-  脚本会自动通过浏览器登录页刷新 Cookie，无需手动维护。
-  如需跳过登录步骤（使用已有 Cookie），可设置环境变量：
-    ANYGEN_COOKIE=<完整 Cookie 字符串>
-  或在脚本同目录创建 cookie.txt，将完整 Cookie 粘贴进去。
+  GET 请求（file_system / 轮询 / 下载）不需要 csrf_token：
+    - 自动通过浏览器打开页面获取，或设置 ANYGEN_COOKIE / cookie.txt
+  POST 请求（创建导出任务）需要 csrf_token：
+    - 通过 --csrf-cookie 参数 / ANYGEN_CSRF_COOKIE 环境变量 / csrf_cookie.txt 文件提供
 
 用法：
-  python anygen_export.py                         # 使用脚本内 PAGE_ID
-  python anygen_export.py <page_id>               # 指定 page_id
-  python anygen_export.py <page_id> -o out.pptx   # 指定输出文件
-  python anygen_export.py <page_id> --headless    # 无头模式
+  python test_expor1t.py https://www.anygen.io/task/your-slug-PAGE_ID -o out.pptx --csrf-cookie "your_cookie_with_csrf"
 """
 
 from __future__ import annotations
@@ -63,10 +69,18 @@ log = logging.getLogger("anygen")
 # 配置
 # ---------------------------------------------------------------------------
 
+# 统一 User-Agent，requests 与 Playwright 保持一致，避免服务端指纹不匹配
+_UNIFIED_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/126.0.0.0 Safari/537.36"
+)
+
+
 @dataclass
 class Config:
     # ---- 必填 ----
-    page_id: str = "QobFpx5CxaOaO7gJKbll6LDkgzh"
+    page_url: str = ""
 
     # ---- 输出 ----
     output_file: str = "anygen_export.pptx"
@@ -92,22 +106,31 @@ class Config:
 
     # ---- 登录页（用于自动获取 Cookie）----
     login_url: str = "https://www.anygen.io/login"
-    login_wait_seconds: int = 120       # 等待用户手动完成登录的最长时间
 
     # ---- 内部（运行时填充）----
     _fixed_cookie: str = field(default="", init=False, repr=False)
-    _csrf_token: str = field(default="", init=False, repr=False)
+    _csrf_cookie: str = field(default="", init=False, repr=False)
+    _expected_slide_count: int = field(default=0, init=False, repr=False)
 
     # ------------------------------------------------------------------
-    # page_url
+    # page_id（从 page_url 末尾提取）
     # ------------------------------------------------------------------
 
     @property
-    def page_url(self) -> str:
-        return (
-            "https://www.anygen.io/task/"
-            f"magic-and-josephus-math-exploration-presentation-{self.page_id}"
-        )
+    def page_id(self) -> str:
+        """从 URL 路径末尾提取 page_id（最后一段中的尾部 token）。"""
+        if not self.page_url:
+            raise RuntimeError("page_url 未设置")
+        # URL 格式: https://www.anygen.io/task/<slug>-<page_id>
+        # page_id 是路径最后一段中最后一个 '-' 之后的部分
+        last_segment = self.page_url.split("?")[0].rstrip("/").rsplit("/", 1)[-1]
+        if "-" in last_segment:
+            candidate = last_segment.rsplit("-", 1)[-1]
+            # page_id 通常是 26 位字母数字
+            if len(candidate) >= 20 and candidate.isalnum():
+                return candidate
+        # 兜底：最后一段整体作为 page_id
+        return last_segment
 
     # ------------------------------------------------------------------
     # Cookie 属性
@@ -118,11 +141,11 @@ class Config:
         return self._fixed_cookie
 
     @property
-    def csrf_token(self) -> str:
-        return self._csrf_token
+    def csrf_cookie(self) -> str:
+        return self._csrf_cookie
 
     def load_cookie_from_env_or_file(self) -> bool:
-        """尝试从环境变量或 cookie.txt 读取 Cookie，成功返回 True。"""
+        """尝试从环境变量或 cookie.txt 读取 GET 用 Cookie，成功返回 True。"""
         cookie = os.getenv("ANYGEN_COOKIE", "").strip()
         if not cookie:
             cookie_file = Path(__file__).with_name("cookie.txt")
@@ -130,16 +153,30 @@ class Config:
                 cookie = cookie_file.read_text(encoding="utf-8").strip()
 
         if cookie:
-            self._set_cookie(cookie)
+            self._fixed_cookie = cookie
             return True
         return False
 
-    def _set_cookie(self, raw_cookie: str) -> None:
-        self._fixed_cookie = raw_cookie
-        parsed = parse_cookie_str(raw_cookie)
-        self._csrf_token = parsed.get("_csrf_token", "")
-        if not self._csrf_token:
-            log.info("Cookie 中没有 _csrf_token，将通过单独请求获取")
+    def load_csrf_cookie(self, cli_value: str = "") -> None:
+        """加载含 csrf_token 的 Cookie，优先级：CLI > 环境变量 > 文件。"""
+        raw = cli_value.strip()
+        if not raw:
+            raw = os.getenv("ANYGEN_CSRF_COOKIE", "").strip()
+        if not raw:
+            cookie_file = Path(__file__).with_name("csrf_cookie.txt")
+            if cookie_file.exists():
+                raw = cookie_file.read_text(encoding="utf-8").strip()
+
+        if raw:
+            self._csrf_cookie = raw
+            parsed = parse_cookie_str(raw)
+            token = parsed.get("_csrf_token", "")
+            if token:
+                log.info("csrf_cookie 已加载，_csrf_token=%s", token[:20] + "...")
+            else:
+                log.warning("csrf_cookie 已加载，但其中没有 _csrf_token")
+        else:
+            log.info("未找到 csrf_cookie，POST 请求将使用 GET 用 Cookie（可能缺少 csrf_token）")
 
 
 # ---------------------------------------------------------------------------
@@ -175,172 +212,178 @@ def browser_cookies_to_header(cookies: list[dict]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 步骤 1：自动登录获取 Cookie
+# 浏览器公共配置
 # ---------------------------------------------------------------------------
 
-async def acquire_cookie_via_browser(cfg: Config) -> None:
+def _browser_args() -> list[str]:
+    return [
+        "--disable-dev-shm-usage",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--disable-features=Translate,BackForwardCache",
+        "--disable-blink-features=AutomationControlled",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-infobars",
+    ]
+
+
+# stealth 初始化脚本：覆盖 navigator.webdriver 等自动化检测点
+_STEALTH_JS = """
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en', 'zh-CN', 'zh'] });
+Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+window.chrome = { runtime: {} };
+const originalQuery = window.navigator.permissions.query;
+window.navigator.permissions.query = (params) =>
+    params.name === 'notifications'
+        ? Promise.resolve({ state: Notification.permission })
+        : originalQuery(params);
+"""
+
+# 从外部 JS 文件加载
+_GET_CLIENT_VARS_JS = Path(__file__).with_name("get_client_vars.js").read_text(
+    encoding="utf-8"
+)
+
+
+# ---------------------------------------------------------------------------
+# 通用重试机制（区分可重试/不可重试错误）
+# ---------------------------------------------------------------------------
+
+# 可重试的 HTTP 状态码（服务端或网关错误）
+_RETRYABLE_STATUS_CODES = {500, 502, 503, 504, 429}
+
+
+def retry_request(
+    fn,
+    *args,
+    max_attempts: int = 3,
+    backoff_base: int = 2,
+    label: str = "",
+    **kwargs,
+) -> Any:
     """
-    打开登录页，等待用户手动登录（或已有 session 自动跳转），
-    然后从浏览器提取最新 Cookie，回写到 cfg。
-    每次打开时会清除浏览器已有 Cookie。
+    通用重试包装，带指数退避。
+    - 5xx / 429 / 网络错误：重试
+    - 4xx（非 429）：直接抛出，不重试（无意义）
     """
-    log.info("=== 步骤 1：获取最新 Cookie ===")
-
-    proxy = {"server": cfg.proxy_server} if cfg.proxy_server else None
-
-    async with async_playwright() as p:
-        context: BrowserContext = await p.chromium.launch_persistent_context(
-            cfg.user_data_dir,
-            headless=cfg.headless,
-            proxy=proxy,
-            viewport={"width": 1280, "height": 900},
-            args=_browser_args(),
-        )
-
-        # 每次打开浏览器时清除已有 Cookie
-        await context.clear_cookies()
-        log.info("已清除浏览器后台 Cookie")
-
-        page = context.pages[0] if context.pages else await context.new_page()
-
-        log.info("打开登录页：%s", cfg.login_url)
-        await page.goto(cfg.login_url, wait_until="domcontentloaded", timeout=60_000)
-
-        # 等待跳转到非登录页（说明已登录）
-        deadline = time.time() + cfg.login_wait_seconds
-        while time.time() < deadline:
-            current_url = page.url
-            if "/login" not in current_url and "anygen.io" in current_url:
-                log.info("检测到已登录，当前 URL：%s", current_url)
-                break
-            log.info("等待登录完成... (%s)", current_url)
-            await page.wait_for_timeout(3_000)
-        else:
-            raise TimeoutError(
-                f"等待登录超时（{cfg.login_wait_seconds}s），"
-                "请在浏览器窗口中完成登录操作。"
-            )
-
-        # 提取 Cookie
-        all_cookies = await context.cookies("https://www.anygen.io")
-        await context.close()
-
-    if not all_cookies:
-        raise RuntimeError("登录后未能获取到任何 Cookie")
-
-    raw_cookie = browser_cookies_to_header(all_cookies)
-    cfg._set_cookie(raw_cookie)
-
-    # 持久化，方便下次跳过登录
-    Path(cfg.debug_cookie).write_text(raw_cookie, encoding="utf-8")
-    log.info("Cookie 已获取并保存到 %s", cfg.debug_cookie)
-    log.info("_csrf_token = %s", cfg.csrf_token or "(未找到)")
+    last_exc: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            log.info("[%s] attempt %d/%d", label, attempt, max_attempts)
+            return fn(*args, **kwargs)
+        except requests.HTTPError as e:
+            # 区分可重试和不可重试的 HTTP 错误
+            status = e.response.status_code if e.response is not None else 0
+            if status not in _RETRYABLE_STATUS_CODES:
+                log.error("[%s] HTTP %d 不可重试，直接抛出", label, status)
+                raise
+            last_exc = e
+            if attempt == max_attempts:
+                raise
+            wait = backoff_base ** attempt
+            log.warning("[%s] HTTP %d，%ds 后重试", label, status, wait)
+            time.sleep(wait)
+        except (requests.ConnectionError, requests.Timeout) as e:
+            last_exc = e
+            if attempt == max_attempts:
+                raise
+            wait = backoff_base ** attempt
+            log.warning("[%s] 网络错误，%ds 后重试：%s", label, wait, e)
+            time.sleep(wait)
+        except ValueError as e:
+            # JSON 解析失败，可能是临时响应异常
+            last_exc = e
+            if attempt == max_attempts:
+                raise
+            wait = backoff_base ** attempt
+            log.warning("[%s] 解析失败，%ds 后重试：%s", label, wait, e)
+            time.sleep(wait)
+    raise last_exc  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------
-# requests Session
+# requests Session（GET 用 / POST 用）
 # ---------------------------------------------------------------------------
 
-def make_session(cfg: Config) -> requests.Session:
-    """创建带 Cookie 的 requests Session。csrf_token 将在后续单独获取。"""
-    if not cfg.fixed_cookie:
-        raise RuntimeError("Cookie 未初始化，请先调用 acquire_cookie_via_browser()")
+_BASE_HEADERS = {
+    "Accept": "application/json, text/plain, */*",
+    "Origin": "https://www.anygen.io",
+    "User-Agent": _UNIFIED_USER_AGENT,  # 与 Playwright 保持一致
+}
 
-    session = requests.Session()
+
+def _apply_proxy(session: requests.Session, cfg: Config) -> None:
     session.trust_env = False
-
     if cfg.proxy_server:
         session.proxies.update({
             "http": cfg.proxy_server,
             "https": cfg.proxy_server,
         })
 
-    session.headers.update({
-        "Accept": "application/json, text/plain, */*",
-        "Content-Type": "application/json",
-        "Origin": "https://www.anygen.io",
-        "Referer": cfg.page_url,
-        "Cookie": cfg.fixed_cookie,
-        "x-csrftoken": cfg.csrf_token,   # 初始值，后续会通过 API 单独获取更新
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-    })
 
+def make_get_session(cfg: Config) -> requests.Session:
+    """创建 GET 用 Session，只需浏览器获取的 Cookie，不带 csrf_token。"""
+    if not cfg.fixed_cookie:
+        raise RuntimeError("Cookie 未初始化，请先获取")
+
+    session = requests.Session()
+    _apply_proxy(session, cfg)
+    session.headers.update(_BASE_HEADERS)
+    session.headers["Cookie"] = cfg.fixed_cookie
+    session.headers["Referer"] = cfg.page_url
     return session
 
 
-# ---------------------------------------------------------------------------
-# 步骤 1.5：单独获取 csrf_token
-# ---------------------------------------------------------------------------
-
-def fetch_csrf_token(session: requests.Session, cfg: Config) -> str:
+def make_post_session(cfg: Config) -> requests.Session:
     """
-    通过单独请求页面接口获取 csrf_token，不依赖浏览器直接提取。
-    依次检查：响应 Cookie 中的 _csrf_token → 响应头 X-CSRFToken → 响应体 JSON。
+    创建 POST 用 Session，使用用户提供的 csrf_cookie（含 _csrf_token）。
+    如果未提供 csrf_cookie，则回退到 GET 用 Cookie。
     """
-    url = f"https://www.anygen.io/api/page/file_system/{cfg.page_id}/files"
-    log.info("=== 步骤 1.5：单独获取 csrf_token ===")
+    cookie = cfg.csrf_cookie or cfg.fixed_cookie
+    if not cookie:
+        raise RuntimeError("无可用 Cookie（csrf_cookie 和 fixed_cookie 均为空）")
 
-    try:
-        resp = session.get(url, timeout=30)
-    except requests.RequestException as e:
-        log.warning("获取 csrf_token 的请求失败：%s", e)
-        return ""
+    parsed = parse_cookie_str(cookie)
+    csrf_token = parsed.get("_csrf_token", "")
+    if not csrf_token:
+        log.warning("POST Session 的 Cookie 中没有 _csrf_token，POST 请求可能被拒绝")
 
-    # 1) 从响应 Set-Cookie 中提取
-    csrf = resp.cookies.get("_csrf_token", "")
-    if csrf:
-        log.info("csrf_token 从响应 Cookie 获取：%s", csrf[:20] + "...")
-        return csrf
-
-    # 2) 从响应头中提取
-    csrf = resp.headers.get("X-CSRFToken", "") or resp.headers.get("X-CSRF-Token", "")
-    if csrf:
-        log.info("csrf_token 从响应头获取：%s", csrf[:20] + "...")
-        return csrf
-
-    # 3) 从响应体 JSON 中提取
-    try:
-        body = resp.json()
-        csrf = body.get("csrf_token", "") or body.get("data", {}).get("csrf_token", "")
-        if csrf:
-            log.info("csrf_token 从响应体获取：%s", csrf[:20] + "...")
-            return csrf
-    except ValueError:
-        pass
-
-    log.warning("未能通过单独请求获取 csrf_token，将使用 Cookie 中的值")
-    return ""
+    session = requests.Session()
+    _apply_proxy(session, cfg)
+    session.headers.update(_BASE_HEADERS)
+    session.headers["Content-Type"] = "application/json"
+    session.headers["Cookie"] = cookie
+    session.headers["Referer"] = cfg.page_url
+    session.headers["x-csrftoken"] = csrf_token
+    return session
 
 
 # ---------------------------------------------------------------------------
 # 步骤 2：file_system 推断页数
 # ---------------------------------------------------------------------------
 
-def fetch_file_system(session: requests.Session, cfg: Config) -> dict[str, Any]:
-    """GET file_system 接口，带简单重试。"""
-    url = f"https://www.anygen.io/api/page/file_system/{cfg.page_id}/files"
-
-    for attempt in range(1, 4):
-        log.info("[file_system] GET %s (attempt %d)", url, attempt)
-        try:
-            resp = session.get(url, timeout=60)
-            resp.raise_for_status()
-            body = resp.json()
-            break
-        except (requests.RequestException, ValueError) as e:
-            if attempt == 3:
-                raise
-            log.warning("[file_system] 请求失败，%ds 后重试：%s", 2 ** attempt, e)
-            time.sleep(2 ** attempt)
-
+def _fetch_file_system_inner(session: requests.Session, url: str) -> dict[str, Any]:
+    """单次 file_system 请求（供 retry_request 调用）。"""
+    resp = session.get(url, timeout=60)
+    resp.raise_for_status()
+    body = resp.json()
     if body.get("code") != 0:
         raise RuntimeError(
             "file_system 接口失败：" + json.dumps(body, ensure_ascii=False)[:2000]
         )
+    return body
+
+
+def fetch_file_system(session: requests.Session, cfg: Config) -> dict[str, Any]:
+    """GET file_system 接口，带统一重试。"""
+    url = f"https://www.anygen.io/api/page/file_system/{cfg.page_id}/files"
+    body = retry_request(
+        _fetch_file_system_inner, session, url,
+        label="file_system",
+    )
 
     Path(cfg.debug_file_system).write_text(
         json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -384,11 +427,11 @@ def infer_slide_count(resp_json: dict[str, Any]) -> dict[str, Any]:
     slide_dir = f"{slide_root}/{deck_base}/"
 
     slide_files = sorted(
-        f for f in files
-        if not f.get("is_directory")
-        and str(f.get("path", "")).startswith(slide_dir)
-        and re.match(r"slide_\d+\.xml$", str(f.get("name", "")))
-    , key=lambda f: str(f.get("name", ""))
+        (f for f in files
+         if not f.get("is_directory")
+         and str(f.get("path", "")).startswith(slide_dir)
+         and re.match(r"slide_\w+\.xml$", str(f.get("name", "")))),
+        key=lambda f: str(f.get("name", "")),
     )
 
     if not slide_files:
@@ -411,251 +454,47 @@ def infer_slide_count(resp_json: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# 步骤 3 & 4：Playwright 打开编辑页，抓取 client_vars
+# 核心：单次浏览器启动，完成 Cookie 获取 + client_vars 抓取
 # ---------------------------------------------------------------------------
 
-# 注入到浏览器执行的 JS，等待 editor 完全加载后调用 getExportClientVars()
-_GET_CLIENT_VARS_JS = r"""
-async ({ minBlockCount, expectedSlideCount, stableMs, timeoutMs }) => {
-  const TAG = "[AnyGenCV]";
-  const sleep = ms => new Promise(r => setTimeout(r, ms));
-  const log = (...a) => console.log(TAG, ...a);
+async def acquire_cookie_and_client_vars(cfg: Config) -> tuple[str, int]:
+    """
+    【核心优化】只启动一次 Playwright，在同一个 context 中完成：
+      1. 打开页面并提取 Cookie
+      2. 等待 editor 加载，抓取 export client_vars
 
-  // ---- 工具函数 ----
+    相比原版节省一次 Chromium 启动（5–15 秒）。
 
-  function isObj(x) { return x && typeof x === "object"; }
-
-  function isEditor(x) {
-    return isObj(x) && typeof x.getExportClientVars === "function";
-  }
-
-  function isEditorRef(x) {
-    return isObj(x) && isEditor(x.current);
-  }
-
-  function fiberOf(node) {
-    if (!node) return null;
-    const k = Object.keys(node).find(
-      k => k.startsWith("__reactFiber$") || k.startsWith("__reactInternalInstance$")
-    );
-    return k ? node[k] : null;
-  }
-
-  // 优先遍历的 key 列表
-  const PRIORITY_KEYS = [
-    "editorInstanceRef","editorRef","instanceRef","ref","current",
-    "props","memoizedProps","pendingProps","memoizedState","stateNode",
-    "return","child","sibling"
-  ];
-
-  // 跳过的 DOM 相关 key（避免循环引用炸堆栈）
-  const SKIP_KEYS = new Set([
-    "ownerDocument","parentNode","children","childNodes","document","window"
-  ]);
-
-  function scanValue(val, seen, maxDepth) {
-    if (!isObj(val) || seen.has(val) || maxDepth < 0) return null;
-    seen.add(val);
-
-    if (isEditor(val))    return val;
-    if (isEditorRef(val)) return val.current;
-
-    for (const k of PRIORITY_KEYS) {
-      try {
-        if (k in val) {
-          const r = scanValue(val[k], seen, maxDepth - 1);
-          if (r) return r;
-        }
-      } catch {}
-    }
-
-    let keys;
-    try { keys = Object.keys(val); } catch { return null; }
-
-    for (const k of keys) {
-      if (PRIORITY_KEYS.includes(k) || SKIP_KEYS.has(k)) continue;
-      try {
-        const r = scanValue(val[k], seen, maxDepth - 1);
-        if (r) return r;
-      } catch {}
-    }
-    return null;
-  }
-
-  function scanFiberTree(root) {
-    const stack = [root];
-    const seenFibers  = new WeakSet();
-    const seenValues  = new WeakSet();   // 提升到 tree 级，避免重复扫描
-
-    while (stack.length) {
-      const fiber = stack.pop();
-      if (!fiber || seenFibers.has(fiber)) continue;
-      seenFibers.add(fiber);
-
-      for (const field of ["memoizedProps","pendingProps","memoizedState","stateNode","ref"]) {
-        try {
-          const r = scanValue(fiber[field], seenValues, 8);
-          if (r) return r;
-        } catch {}
-      }
-
-      if (fiber.child)   stack.push(fiber.child);
-      if (fiber.sibling) stack.push(fiber.sibling);
-    }
-    return null;
-  }
-
-  function findEditor(doc, label) {
-    const candidates = [
-      doc.getElementById("root"),
-      doc.getElementById("__next"),
-      doc.body,
-      doc.documentElement,
-      ...doc.querySelectorAll("div,section,main")
-    ].filter(Boolean);
-
-    for (const node of candidates) {
-      const fiber = fiberOf(node);
-      if (!fiber) continue;
-      const editor = scanFiberTree(fiber);
-      if (editor) { log("editor found in", label); return editor; }
-    }
-    return null;
-  }
-
-  function findEditorAnywhere() {
-    let e = findEditor(document, "main");
-    if (e) return e;
-
-    for (let i = 0; i < document.querySelectorAll("iframe").length; i++) {
-      try {
-        const doc = document.querySelectorAll("iframe")[i].contentDocument;
-        if (!doc) continue;
-        e = findEditor(doc, "iframe-" + i);
-        if (e) return e;
-      } catch {}
-    }
-    return null;
-  }
-
-  // ---- 解析 clientVars ----
-
-  function parseCV(cv) {
-    if (!cv?.block_map) return { blockCount: 0, slideCount: 0, sig: "0:0" };
-    const blockCount = Object.keys(cv.block_map).length;
-    let root = cv.block_map[cv.id]?.data;
-    if (!root || root.type !== "presentation") {
-      root = Object.values(cv.block_map).find(b => b?.data?.type === "presentation")?.data;
-    }
-    const slideCount = Array.isArray(root?.slides) ? root.slides.length : 0;
-    return { blockCount, slideCount, sig: `${slideCount}:${blockCount}` };
-  }
-
-  function isComplete(info) {
-    const okSlides = !expectedSlideCount || info.slideCount >= expectedSlideCount;
-    return okSlides && info.blockCount >= minBlockCount;
-  }
-
-  // ---- 主循环 ----
-
-  log("start, expectedSlides=" + expectedSlideCount + " minBlocks=" + minBlockCount);
-
-  const deadline = Date.now() + timeoutMs;
-  let lastSig = "";
-  let stableSince = 0;
-  let lastInfo = null;
-
-  while (Date.now() < deadline) {
-    const editor = findEditorAnywhere();
-
-    if (editor) {
-      try {
-        const cv = editor.getClientVars();
-        const info = parseCV(cv);
-        lastInfo = info;
-
-        if (info.sig !== lastSig) {
-          lastSig = info.sig;
-          stableSince = Date.now();
-        }
-
-        const stableFor = Date.now() - stableSince;
-        log(`slides=${info.slideCount} blocks=${info.blockCount} stableFor=${stableFor}ms`);
-
-        if (isComplete(info) && stableFor >= stableMs) {
-          log("stable & complete → calling getExportClientVars()");
-          const exportCV = await editor.getExportClientVars();
-          if (!exportCV) throw new Error("getExportClientVars() returned empty");
-
-          const finalInfo = parseCV(exportCV);
-          log("export done: slides=" + finalInfo.slideCount + " blocks=" + finalInfo.blockCount);
-
-          if (expectedSlideCount && finalInfo.slideCount < expectedSlideCount)
-            throw new Error("export slideCount insufficient: " + finalInfo.slideCount);
-          if (finalInfo.blockCount < minBlockCount)
-            throw new Error("export blockCount insufficient: " + finalInfo.blockCount);
-
-          const str = JSON.stringify(exportCV);
-          return {
-            clientVarsString: str,
-            blockCount: finalInfo.blockCount,
-            slideCount: finalInfo.slideCount,
-            stringLength: str.length,
-            topKeys: Object.keys(exportCV),
-            pageId: exportCV.id || ""
-          };
-        }
-      } catch (e) {
-        log("editor not ready:", String(e));
-      }
-    }
-
-    await sleep(1000);
-  }
-
-  const msg = lastInfo
-    ? `timeout: slides=${lastInfo.slideCount}/${expectedSlideCount} blocks=${lastInfo.blockCount}/${minBlockCount}`
-    : "timeout: editor not found";
-  throw new Error(msg);
-}
-"""
-
-
-def _browser_args() -> list[str]:
-    return [
-        "--disable-dev-shm-usage",
-        "--disable-background-timer-throttling",
-        "--disable-backgrounding-occluded-windows",
-        "--disable-renderer-backgrounding",
-        "--disable-features=Translate,BackForwardCache",
-    ]
-
-
-async def get_client_vars(cfg: Config) -> str:
-    """打开编辑页，注入统一 Cookie，等待 editor 加载后抓取 export client_vars。"""
-    log.info("=== 步骤 3&4：打开编辑页，抓取 client_vars ===")
+    如果 cfg.fixed_cookie 已预先加载（来自环境变量/文件），则跳过 Cookie 提取，
+    直接注入已有 Cookie 并抓取 client_vars。
+    """
+    log.info("=== 启动浏览器（Cookie 获取 + client_vars 抓取）===")
 
     proxy = {"server": cfg.proxy_server} if cfg.proxy_server else None
-    min_block_count = max(10, cfg.min_blocks_per_slide)  # 将在 JS 里乘以 slide_count
+    cookie_already_loaded = bool(cfg.fixed_cookie)
 
     async with async_playwright() as p:
         context: BrowserContext = await p.chromium.launch_persistent_context(
             cfg.user_data_dir,
             headless=cfg.headless,
             proxy=proxy,
+            user_agent=_UNIFIED_USER_AGENT,
             viewport={"width": 1440, "height": 1000},
             args=_browser_args(),
         )
+        await context.add_init_script(_STEALTH_JS)
 
-        # 每次打开浏览器时清除已有 Cookie
+        # 清除旧 Cookie，注入正确的 Cookie
         await context.clear_cookies()
-        log.info("已清除浏览器后台 Cookie")
 
-        # 统一注入 Cookie，与 requests session 保持一致
-        cookie_dict = parse_cookie_str(cfg.fixed_cookie)
-        await context.add_cookies(
-            cookies_dict_to_playwright(cookie_dict, domain="www.anygen.io")
-        )
+        if cookie_already_loaded:
+            # 已有 Cookie（来自文件/环境变量），直接注入
+            log.info("[browser] 注入已有 Cookie")
+            cookie_dict = parse_cookie_str(cfg.fixed_cookie)
+            await context.add_cookies(
+                cookies_dict_to_playwright(cookie_dict, domain="www.anygen.io")
+            )
+        # 若无已有 Cookie，不注入任何内容，让页面自然生成
 
         page = context.pages[0] if context.pages else await context.new_page()
 
@@ -664,7 +503,7 @@ async def get_client_vars(cfg: Config) -> str:
             text = msg.text
             if "net::ERR_FAILED" in text or "net::ERR_CONNECTION_CLOSED" in text:
                 return
-            log.debug("[browser] %s", text)
+            log.info("[browser] %s", text)
 
         page.on("console", _on_console)
 
@@ -672,12 +511,23 @@ async def get_client_vars(cfg: Config) -> str:
             log.info("[browser] 打开：%s", cfg.page_url)
             await page.goto(
                 cfg.page_url,
-                wait_until="domcontentloaded",
+                wait_until="load",
                 timeout=90_000,
             )
-            await page.wait_for_timeout(2_000)
+            await page.wait_for_timeout(3_000)
 
-            expected_slide_count = getattr(cfg, "_expected_slide_count", 0)
+            # 若无预加载 Cookie，从浏览器当前状态提取
+            if not cookie_already_loaded:
+                all_cookies = await context.cookies("https://www.anygen.io")
+                if not all_cookies:
+                    raise RuntimeError("未能获取到任何 Cookie")
+                raw_cookie = browser_cookies_to_header(all_cookies)
+                cfg._fixed_cookie = raw_cookie
+                Path(cfg.debug_cookie).write_text(raw_cookie, encoding="utf-8")
+                log.info("[browser] Cookie 已提取并保存到 %s", cfg.debug_cookie)
+
+            # ---- 抓取 client_vars（复用同一 page）----
+            expected_slide_count = cfg._expected_slide_count
             min_block_count = max(10, expected_slide_count * cfg.min_blocks_per_slide)
             log.info(
                 "[inject] expectedSlideCount=%d minBlockCount=%d",
@@ -705,25 +555,38 @@ async def get_client_vars(cfg: Config) -> str:
             await context.close()
 
     client_vars_str: str = result["clientVarsString"]
+    actual_slide_count: int = result.get("actualSlideCount", result["slideCount"])
     log.info(
-        "[client_vars] slide_count=%d block_count=%d string_length=%d",
-        result["slideCount"], result["blockCount"], result["stringLength"],
+        "[client_vars] slide_count=%d block_count=%d actual_slide_count=%d string_length=%d",
+        result["slideCount"], result["blockCount"], actual_slide_count, result["stringLength"],
     )
 
     Path(cfg.debug_client_vars).write_text(client_vars_str, encoding="utf-8")
     log.info("[client_vars] 已保存到 %s", cfg.debug_client_vars)
 
-    return client_vars_str
+    return client_vars_str, actual_slide_count
 
 
 # ---------------------------------------------------------------------------
 # client_vars 校验
 # ---------------------------------------------------------------------------
 
-def validate_client_vars(client_vars_str: str, cfg: Config) -> None:
-    """解析并校验 client_vars 的完整性。"""
+def _find_presentation_root(block_map: dict, root_id: str) -> dict:
+    """从 block_map 中找到 presentation 根节点 data，抽取公共逻辑。"""
+    root_data = block_map.get(root_id, {}).get("data", {})
+    if root_data.get("type") == "presentation":
+        return root_data
+    return next(
+        (b.get("data", {}) for b in block_map.values()
+         if isinstance(b, dict) and b.get("data", {}).get("type") == "presentation"),
+        {},
+    )
+
+
+def validate_client_vars(client_vars_str: str, cfg: Config, actual_slide_count: int = 0) -> None:
+    """解析并校验 client_vars 的完整性。actual_slide_count 来自 DOM 的 data-slide-index。"""
     obj = json.loads(client_vars_str)
-    expected_slide_count = getattr(cfg, "_expected_slide_count", 0)
+    expected_slide_count = actual_slide_count or cfg._expected_slide_count
     min_block_count = max(10, expected_slide_count * cfg.min_blocks_per_slide)
 
     if obj.get("type") != "CLIENT_VARS":
@@ -732,13 +595,7 @@ def validate_client_vars(client_vars_str: str, cfg: Config) -> None:
     block_map = obj.get("block_map") or {}
     block_count = len(block_map)
 
-    root_data = block_map.get(obj.get("id"), {}).get("data", {})
-    if root_data.get("type") != "presentation":
-        root_data = next(
-            (b.get("data", {}) for b in block_map.values()
-             if isinstance(b, dict) and b.get("data", {}).get("type") == "presentation"),
-            {},
-        )
+    root_data = _find_presentation_root(block_map, obj.get("id", ""))
     slide_count = len(root_data.get("slides") or [])
 
     log.info(
@@ -757,33 +614,16 @@ def validate_client_vars(client_vars_str: str, cfg: Config) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 步骤 5：创建导出任务
+# 步骤 4：创建导出任务
 # ---------------------------------------------------------------------------
 
-def create_export_job(
-    session: requests.Session,
-    cfg: Config,
-    client_vars_str: str,
+def _create_export_job_inner(
+    session: requests.Session, url: str, payload: dict,
 ) -> tuple[str, int]:
-    """POST 创建导出任务，_csrf_token 已在 session header 中单独传递。"""
-    url = f"https://www.anygen.io/api/page/pages/{cfg.page_id}/export-jobs/"
-    payload = {
-        "export_type": 3,
-        "extra_params": {"client_vars": client_vars_str},
-    }
-
-    for attempt in range(1, 4):
-        log.info("[create_job] POST %s (attempt %d)", url, attempt)
-        try:
-            resp = session.post(url, json=payload, timeout=90)
-            resp.raise_for_status()
-            body = resp.json()
-            break
-        except (requests.RequestException, ValueError) as e:
-            if attempt == 3:
-                raise
-            log.warning("[create_job] 请求失败，%ds 后重试：%s", 2 ** attempt, e)
-            time.sleep(2 ** attempt)
+    """单次创建导出任务请求（供 retry_request 调用）。"""
+    resp = session.post(url, json=payload, timeout=90)
+    resp.raise_for_status()
+    body = resp.json()
 
     log.info("[create_job] response = %s", json.dumps(body, ensure_ascii=False)[:500])
 
@@ -801,12 +641,32 @@ def create_export_job(
             "响应中没有 job_id：" + json.dumps(body, ensure_ascii=False)
         )
 
+    return job_id, job_timeout
+
+
+def create_export_job(
+    session: requests.Session,
+    cfg: Config,
+    client_vars_str: str,
+) -> tuple[str, int]:
+    """POST 创建导出任务，带统一重试。"""
+    url = f"https://www.anygen.io/api/page/pages/{cfg.page_id}/export-jobs/"
+    payload = {
+        "export_type": 3,
+        "extra_params": {"client_vars": client_vars_str},
+    }
+
+    job_id, job_timeout = retry_request(
+        _create_export_job_inner, session, url, payload,
+        label="create_job",
+    )
+
     log.info("[create_job] job_id=%s job_timeout=%d", job_id, job_timeout)
     return job_id, job_timeout
 
 
 # ---------------------------------------------------------------------------
-# 步骤 6：轮询导出任务（指数退避）
+# 步骤 5：轮询导出任务
 # ---------------------------------------------------------------------------
 
 def poll_export_job(
@@ -814,11 +674,21 @@ def poll_export_job(
     job_id: str,
     max_wait_seconds: int,
 ) -> str:
-    """轮询任务状态，返回 document_id 或 document_url。"""
+    """
+    轮询任务状态，返回 document_id 或 document_url。
+
+    轮询策略：
+      - 排队中（job_status=1）：指数退避，最长 30s，等待资源分配
+      - 进行中（job_status=2）：固定 3s，任务快完成时尽快获取结果
+      - 服务端错误（5xx）：指数退避后重试，连续 3 次放弃
+    """
     url = f"https://www.anygen.io/api/page/export-jobs/{job_id}"
     deadline = time.time() + max_wait_seconds
-    interval = 3.0
+    queued_interval = 3.0   # 排队初始间隔
+    running_interval = 3.0  # 进行中固定间隔
     round_num = 0
+    consecutive_errors = 0
+    max_server_errors = 3
 
     while time.time() < deadline:
         round_num += 1
@@ -826,19 +696,68 @@ def poll_export_job(
             resp = session.get(url, timeout=30)
             resp.raise_for_status()
             body = resp.json()
-        except (requests.RequestException, ValueError) as e:
-            log.warning("[poll %d] 请求异常：%s，%.0fs 后重试", round_num, e, interval)
-            time.sleep(interval)
-            interval = min(interval * 1.5, 30)
+        except (requests.ConnectionError, requests.Timeout) as e:
+            consecutive_errors += 1
+            log.warning(
+                "[poll %d] 网络异常：%s，%.0fs 后重试（连续错误 %d/%d）",
+                round_num, e, queued_interval, consecutive_errors, max_server_errors,
+            )
+            if consecutive_errors >= max_server_errors:
+                raise RuntimeError(
+                    f"轮询连续 {max_server_errors} 次网络异常，放弃：{e}"
+                ) from e
+            time.sleep(queued_interval)
+            queued_interval = min(queued_interval * 1.5, 30)
+            continue
+        except requests.HTTPError as e:
+            status = e.response.status_code if e.response is not None else 0
+            if status not in _RETRYABLE_STATUS_CODES:
+                raise  # 4xx 直接抛出
+            consecutive_errors += 1
+            log.warning(
+                "[poll %d] HTTP %d，%.0fs 后重试（连续错误 %d/%d）",
+                round_num, status, queued_interval, consecutive_errors, max_server_errors,
+            )
+            if consecutive_errors >= max_server_errors:
+                raise RuntimeError(f"轮询连续 {max_server_errors} 次服务端错误，放弃")
+            time.sleep(queued_interval)
+            queued_interval = min(queued_interval * 1.5, 30)
+            continue
+        except ValueError as e:
+            consecutive_errors += 1
+            log.warning("[poll %d] JSON 解析失败：%s", round_num, e)
+            if consecutive_errors >= max_server_errors:
+                raise RuntimeError("轮询 JSON 解析连续失败") from e
+            time.sleep(queued_interval)
             continue
 
         if body.get("code") not in (0, None):
-            raise RuntimeError("轮询失败：" + json.dumps(body, ensure_ascii=False))
+            consecutive_errors += 1
+            code = body.get("code")
+            log.warning(
+                "[poll %d] 服务端返回 code=%s，%.0fs 后重试（连续错误 %d/%d）",
+                round_num, code, queued_interval, consecutive_errors, max_server_errors,
+            )
+            if consecutive_errors >= max_server_errors:
+                raise RuntimeError(
+                    f"轮询连续 {max_server_errors} 次服务端错误，放弃："
+                    + json.dumps(body, ensure_ascii=False)[:2000]
+                )
+            time.sleep(queued_interval)
+            queued_interval = min(queued_interval * 1.5, 30)
+            continue
+
+        # 请求成功，重置连续错误计数
+        consecutive_errors = 0
 
         data = body.get("data") or body
         result = data.get("result") or {}
-        job_status = data.get("job_status") or result.get("job_status")
-        error = data.get("error") or result.get("error")
+        job_status = data.get("job_status")
+        if job_status is None:
+            job_status = result.get("job_status")
+        error = data.get("error")
+        if error is None:
+            error = result.get("error")
 
         log.info("[poll %d] job_status=%s", round_num, job_status)
 
@@ -855,9 +774,13 @@ def poll_export_job(
                 "任务成功但无 document_id/document_url：" + json.dumps(body, ensure_ascii=False)
             )
 
-        if job_status in (1, 2):  # 排队 / 进行中
-            time.sleep(interval)
-            interval = min(interval * 1.5, 30)  # 指数退避，上限 30s
+        if job_status == 1:  # 排队中：指数退避
+            time.sleep(queued_interval)
+            queued_interval = min(queued_interval * 1.5, 30)
+            continue
+
+        if job_status == 2:  # 进行中：固定短间隔，尽快拿到结果
+            time.sleep(running_interval)
             continue
 
         raise RuntimeError(
@@ -870,7 +793,7 @@ def poll_export_job(
 
 
 # ---------------------------------------------------------------------------
-# 步骤 7：下载并校验 PPTX
+# 步骤 6：下载并校验 PPTX
 # ---------------------------------------------------------------------------
 
 def download_and_validate(
@@ -889,16 +812,12 @@ def download_and_validate(
 
     log.info("[download] %s", url)
 
-    for attempt in range(1, 4):
-        try:
-            resp = session.get(url, stream=True, timeout=180)
-            resp.raise_for_status()
-            break
-        except requests.RequestException as e:
-            if attempt == 3:
-                raise
-            log.warning("[download] 请求失败，%ds 后重试：%s", 2 ** attempt, e)
-            time.sleep(2 ** attempt)
+    def _do_download():
+        resp = session.get(url, stream=True, timeout=180)
+        resp.raise_for_status()
+        return resp
+
+    resp = retry_request(_do_download, label="download", max_attempts=3)
 
     output_path = Path(output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -936,52 +855,160 @@ def download_and_validate(
 async def main(cfg: Config) -> None:
     start = time.time()
 
-    # ── 步骤 1：获取 Cookie ──────────────────────────────────────────
-    if cfg.load_cookie_from_env_or_file():
+    # ── 加载 csrf_cookie（POST 用，含 _csrf_token）───────────────────
+    cli_csrf = getattr(cfg, "_cli_csrf_cookie", "")
+    cfg.load_csrf_cookie(cli_value=cli_csrf)
+
+    # ── 步骤 1：尝试从本地加载 Cookie ────────────────────────────────
+    cookie_preloaded = cfg.load_cookie_from_env_or_file()
+    if cookie_preloaded:
         log.info("使用已有 Cookie（来自环境变量或 cookie.txt）")
-        log.info("_csrf_token = %s", cfg.csrf_token or "(未找到)")
     else:
-        log.info("未找到已有 Cookie，将通过浏览器登录获取")
-        await acquire_cookie_via_browser(cfg)
+        log.info("未找到已有 Cookie，将在浏览器中自动提取")
 
-    # ── 步骤 2：推断页数 ─────────────────────────────────────────────
-    log.info("=== 步骤 2：推断 PPT 页数 ===")
-    session = make_session(cfg)
+    # ── 步骤 2：推断页数（需要 Cookie，若已预加载则直接请求）─────────
+    # 若无预加载 Cookie，先用浏览器打开页面获取 Cookie，再做 file_system 请求。
+    # 此处做一次判断：有 Cookie 则直接请求，无则先启动浏览器。
+    if cookie_preloaded:
+        log.info("=== 步骤 2：推断 PPT 页数 ===")
+        get_session = make_get_session(cfg)
+        fs_json = fetch_file_system(get_session, cfg)
+        slide_info = infer_slide_count(fs_json)
+        cfg._expected_slide_count = slide_info["slide_count"]
+        log.info("预期页数：%d", cfg._expected_slide_count)
 
-    # ── 步骤 1.5：单独获取 csrf_token ────────────────────────────────
-    fresh_token = fetch_csrf_token(session, cfg)
-    if fresh_token:
-        cfg._csrf_token = fresh_token
-        session.headers["x-csrftoken"] = fresh_token
-        log.info("已用单独获取的 csrf_token 更新 session")
+        # ── 步骤 3：浏览器抓取 client_vars（Cookie 已有，直接注入）──
+        log.info("=== 步骤 3：抓取 client_vars ===")
+        client_vars_str, actual_slide_count = await acquire_cookie_and_client_vars(cfg)
 
-    fs_json = fetch_file_system(session, cfg)
-    slide_info = infer_slide_count(fs_json)
-    cfg._expected_slide_count = slide_info["slide_count"]  # 运行时注入
-    log.info("预期页数：%d", cfg._expected_slide_count)
-
-    # ── 步骤 3&4：抓取 client_vars ───────────────────────────────────
-    client_vars_str = await get_client_vars(cfg)
+    else:
+        # 无预加载 Cookie：浏览器启动后先拿 Cookie，再用 requests 推断页数，
+        # 但 file_system 需要 Cookie，所以先启动浏览器拿 Cookie，
+        # 然后在同一个浏览器中抓 client_vars。
+        # 为保持单次浏览器启动，将 file_system 请求安排在 Cookie 提取后、
+        # evaluate 注入前完成——通过在 acquire_cookie_and_client_vars 中
+        # 插入一个回调来实现。
+        log.info("=== 步骤 2+3：浏览器提取 Cookie + 推断页数 + 抓取 client_vars ===")
+        client_vars_str, actual_slide_count = await _acquire_all_in_one(cfg)
 
     # ── 校验 ─────────────────────────────────────────────────────────
     log.info("=== 校验 client_vars ===")
-    validate_client_vars(client_vars_str, cfg)
+    validate_client_vars(client_vars_str, cfg, actual_slide_count)
 
-    # ── 步骤 5：创建导出任务 ─────────────────────────────────────────
-    log.info("=== 步骤 5：创建导出任务 ===")
-    job_id, job_timeout = create_export_job(session, cfg, client_vars_str)
+    # ── 步骤 4：创建导出任务（POST，需要 csrf_token）──────────────────
+    log.info("=== 步骤 4：创建导出任务 ===")
+    post_session = make_post_session(cfg)
+    job_id, job_timeout = create_export_job(post_session, cfg, client_vars_str)
 
-    # ── 步骤 6：轮询 ─────────────────────────────────────────────────
-    log.info("=== 步骤 6：轮询导出任务 ===")
+    # ── 步骤 5：轮询（使用 post_session 保持同一认证态）──────────────
+    log.info("=== 步骤 5：轮询导出任务 ===")
     max_wait = max(cfg.export_wait_seconds, job_timeout + 60)
-    doc_id_or_url = poll_export_job(session, job_id, max_wait)
+    doc_id_or_url = poll_export_job(post_session, job_id, max_wait)
 
-    # ── 步骤 7：下载 & 校验 ──────────────────────────────────────────
-    log.info("=== 步骤 7：下载 PPTX ===")
-    download_and_validate(session, doc_id_or_url, cfg.output_file)
+    # ── 步骤 6：下载 & 校验 ──────────────────────────────────────────
+    log.info("=== 步骤 6：下载 PPTX ===")
+    download_and_validate(post_session, doc_id_or_url, cfg.output_file)
 
     elapsed = time.time() - start
     log.info("=== 完成 ✓  耗时 %.1f 秒  输出：%s ===", elapsed, cfg.output_file)
+
+
+async def _acquire_all_in_one(cfg: Config) -> tuple[str, int]:
+    """
+    无预加载 Cookie 时的一体化流程：
+      1. 浏览器打开页面 → 提取 Cookie
+      2. 用提取到的 Cookie 做 file_system 请求（requests，在浏览器等待页面加载期间并行不安全，故串行）
+      3. 在同一 page 上 evaluate client_vars JS
+
+    保证整个过程只启动一次 Playwright。
+    """
+    log.info("=== 启动浏览器（单次，完成 Cookie + 页数推断 + client_vars）===")
+
+    proxy = {"server": cfg.proxy_server} if cfg.proxy_server else None
+
+    async with async_playwright() as p:
+        context: BrowserContext = await p.chromium.launch_persistent_context(
+            cfg.user_data_dir,
+            headless=cfg.headless,
+            proxy=proxy,
+            user_agent=_UNIFIED_USER_AGENT,
+            viewport={"width": 1440, "height": 1000},
+            args=_browser_args(),
+        )
+        await context.add_init_script(_STEALTH_JS)
+        await context.clear_cookies()
+
+        page = context.pages[0] if context.pages else await context.new_page()
+
+        def _on_console(msg):
+            text = msg.text
+            if "net::ERR_FAILED" in text or "net::ERR_CONNECTION_CLOSED" in text:
+                return
+            log.info("[browser] %s", text)
+
+        page.on("console", _on_console)
+
+        try:
+            log.info("[browser] 打开：%s", cfg.page_url)
+            await page.goto(cfg.page_url, wait_until="load", timeout=90_000)
+            await page.wait_for_timeout(3_000)
+
+            # ---- 提取 Cookie ----
+            all_cookies = await context.cookies("https://www.anygen.io")
+            if not all_cookies:
+                raise RuntimeError("未能获取到任何 Cookie")
+            raw_cookie = browser_cookies_to_header(all_cookies)
+            cfg._fixed_cookie = raw_cookie
+            Path(cfg.debug_cookie).write_text(raw_cookie, encoding="utf-8")
+            log.info("[browser] Cookie 已提取，保存到 %s", cfg.debug_cookie)
+
+            # ---- 用 Cookie 做 file_system 请求（同步，不阻塞浏览器渲染）----
+            log.info("[file_system] 推断 PPT 页数...")
+            get_session = make_get_session(cfg)
+            fs_json = fetch_file_system(get_session, cfg)
+            slide_info = infer_slide_count(fs_json)
+            cfg._expected_slide_count = slide_info["slide_count"]
+            log.info("预期页数：%d", cfg._expected_slide_count)
+
+            # ---- 抓取 client_vars ----
+            expected_slide_count = cfg._expected_slide_count
+            min_block_count = max(10, expected_slide_count * cfg.min_blocks_per_slide)
+            log.info(
+                "[inject] expectedSlideCount=%d minBlockCount=%d",
+                expected_slide_count, min_block_count,
+            )
+
+            result = await page.evaluate(
+                _GET_CLIENT_VARS_JS,
+                {
+                    "minBlockCount": min_block_count,
+                    "expectedSlideCount": expected_slide_count,
+                    "stableMs": cfg.stable_seconds * 1000,
+                    "timeoutMs": cfg.editor_wait_seconds * 1000,
+                },
+            )
+
+        except Exception:
+            try:
+                await page.screenshot(path=cfg.error_screenshot, full_page=True)
+                log.info("[debug] 截图已保存：%s", cfg.error_screenshot)
+            except Exception as se:
+                log.warning("[debug] 截图失败：%s", se)
+            raise
+        finally:
+            await context.close()
+
+    client_vars_str: str = result["clientVarsString"]
+    actual_slide_count: int = result.get("actualSlideCount", result["slideCount"])
+    log.info(
+        "[client_vars] slide_count=%d block_count=%d actual_slide_count=%d string_length=%d",
+        result["slideCount"], result["blockCount"], actual_slide_count, result["stringLength"],
+    )
+
+    Path(cfg.debug_client_vars).write_text(client_vars_str, encoding="utf-8")
+    log.info("[client_vars] 已保存到 %s", cfg.debug_client_vars)
+
+    return client_vars_str, actual_slide_count
 
 
 # ---------------------------------------------------------------------------
@@ -990,14 +1017,12 @@ async def main(cfg: Config) -> None:
 
 def parse_args() -> Config:
     parser = argparse.ArgumentParser(
-        description="AnyGen PPTX 自动导出工具",
+        description="AnyGen PPTX 自动导出工具（优化版）",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "page_id",
-        nargs="?",
-        default=Config.page_id,
-        help="AnyGen Page ID",
+        "url",
+        help="完整的页面 URL，例如 https://www.anygen.io/task/your-slug-PAGE_ID",
     )
     parser.add_argument(
         "-o", "--output",
@@ -1028,15 +1053,22 @@ def parse_args() -> Config:
         metavar="N",
         help="editor 数据稳定判定时间（秒）",
     )
+    parser.add_argument(
+        "--csrf-cookie",
+        default="",
+        metavar="COOKIE",
+        help="含 _csrf_token 的 Cookie 字符串（POST 导出任务用），也可通过 ANYGEN_CSRF_COOKIE 环境变量或 csrf_cookie.txt 提供",
+    )
     args = parser.parse_args()
 
     cfg = Config(
-        page_id=args.page_id,
+        page_url=args.url,
         output_file=args.output,
         headless=args.headless,
         proxy_server=None if args.no_proxy else args.proxy,
         stable_seconds=args.stable_seconds,
     )
+    cfg._cli_csrf_cookie = args.csrf_cookie
     return cfg
 
 
