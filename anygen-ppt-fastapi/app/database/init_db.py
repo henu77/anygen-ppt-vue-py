@@ -29,15 +29,77 @@ def migrate_db():
     from sqlalchemy import text
     db = SessionLocal()
     try:
-        # 检查 xianyu_accounts 是否有 nickname 列
+        # tasks.key_id 改为允许 NULL（删除卡密时保留任务）
+        result = db.execute(text("PRAGMA table_info(tasks)"))
+        columns = {row[1]: row for row in result.fetchall()}
+        if "key_id" in columns and columns["key_id"][3] == 1:  # 1 = NOT NULL
+            logger.info("迁移 tasks.key_id 为可空...")
+            # 获取原表所有列名
+            col_names = list(columns.keys())
+            # 重命名旧表
+            db.execute(text("ALTER TABLE tasks RENAME TO tasks_old"))
+            # 创建新表（key_id 允许 NULL）
+            db.execute(text("""
+                CREATE TABLE tasks (
+                    id INTEGER PRIMARY KEY,
+                    key_id INTEGER,
+                    url VARCHAR(500) NOT NULL,
+                    email VARCHAR(255) NOT NULL,
+                    status VARCHAR(50) NOT NULL DEFAULT 'pending',
+                    file_path VARCHAR(500),
+                    error_msg TEXT,
+                    completed_at DATETIME,
+                    created_at DATETIME,
+                    updated_at DATETIME
+                )
+            """))
+            # 按列名复制数据
+            cols_csv = ", ".join(col_names)
+            db.execute(text(f"INSERT INTO tasks ({cols_csv}) SELECT {cols_csv} FROM tasks_old"))
+            db.execute(text("DROP TABLE tasks_old"))
+            db.commit()
+            logger.info("tasks.key_id 迁移完成")
+    except Exception as e:
+        logger.warning(f"tasks 迁移检查: {e}")
+        db.rollback()
+    try:
+        # 检查 xianyu_accounts 已有列
         result = db.execute(text("PRAGMA table_info(xianyu_accounts)"))
         columns = [row[1] for row in result.fetchall()]
         if "nickname" not in columns:
             db.execute(text("ALTER TABLE xianyu_accounts ADD COLUMN nickname VARCHAR(255)"))
             db.commit()
             logger.info("已为 xianyu_accounts 添加 nickname 列")
+        if "auto_delivery" not in columns:
+            db.execute(text("ALTER TABLE xianyu_accounts ADD COLUMN auto_delivery BOOLEAN DEFAULT 0"))
+            db.commit()
+            logger.info("已为 xianyu_accounts 添加 auto_delivery 列")
+        if "auto_item_id" not in columns:
+            db.execute(text("ALTER TABLE xianyu_accounts ADD COLUMN auto_item_id VARCHAR(100)"))
+            db.commit()
+            logger.info("已为 xianyu_accounts 添加 auto_item_id 列")
     except Exception as e:
-        logger.warning(f"数据库迁移检查: {e}")
+        logger.warning(f"xianyu_accounts 迁移检查: {e}")
+        db.rollback()
+
+    # xianyu_orders 新列迁移
+    try:
+        result = db.execute(text("PRAGMA table_info(xianyu_orders)"))
+        order_columns = [row[1] for row in result.fetchall()]
+        new_order_cols = {
+            "key_id": "INTEGER",
+            "buyer_nick": "VARCHAR(100)",
+            "amount": "VARCHAR(50)",
+            "item_id": "VARCHAR(100)",
+            "delivered_at": "DATETIME",
+        }
+        for col_name, col_type in new_order_cols.items():
+            if col_name not in order_columns:
+                db.execute(text(f"ALTER TABLE xianyu_orders ADD COLUMN {col_name} {col_type}"))
+                db.commit()
+                logger.info(f"已为 xianyu_orders 添加 {col_name} 列")
+    except Exception as e:
+        logger.warning(f"xianyu_orders 迁移检查: {e}")
         db.rollback()
 
     # 设置默认发货模板（为空的账户）

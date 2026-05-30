@@ -13,3 +13,4 @@ qrcode==7.4.2
 pillow==10.1.0
 apscheduler>=3.10,<4
 playwright>=1.40
+websockets>=12.0

@@ -1,4 +1,18 @@
 import os
+import sys
+import asyncio
+
+# 解决 asyncio 子进程支持问题（Playwright 需要 ProactorEventLoop）
+# uvicorn 在 reload 模式下会强制设置 WindowsSelectorEventLoopPolicy，导致 Playwright 无法创建子进程
+# 需要在 uvicorn 运行前 patch 掉这个行为
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    # Monkey-patch uvicorn 的事件循环设置，阻止它覆盖为 SelectorEventLoop
+    try:
+        import uvicorn.loops.asyncio as _uvloop_asyncio
+        _uvloop_asyncio.asyncio_setup = lambda use_subprocess=False: None
+    except ImportError:
+        pass
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
@@ -20,10 +34,21 @@ init_db()
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     from app.scheduler import start as start_scheduler, shutdown as stop_scheduler
+    from app.xianyu_live import XianyuLiveManager
+    from app.database.db import SessionLocal
+
     logger.info("应用启动成功")
     logger.info(f"API 文档: http://{app_settings.HOST}:{app_settings.PORT}/docs")
     start_scheduler()
+
+    # 启动闲鱼自动发货服务
+    live_manager = XianyuLiveManager(db_session_factory=SessionLocal)
+    app.state.live_manager = live_manager
+    await live_manager.start()
+
     yield
+
+    await live_manager.stop()
     stop_scheduler()
     logger.info("应用关闭")
 

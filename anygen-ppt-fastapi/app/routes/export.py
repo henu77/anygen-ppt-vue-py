@@ -50,11 +50,8 @@ async def submit_export(
     # 创建任务
     task = TaskService.create_task(db, key.id, request.url, request.email)
 
-    # 使用卡密
-    KeyService.use_key(db, request.key)
-
-    # 后台处理导出
-    background_tasks.add_task(ExportService.export_ppt, task.id, db)
+    # 后台处理导出（卡密在导出成功后才消耗，失败不浪费次数）
+    background_tasks.add_task(ExportService.export_ppt, task.id, db, request.key)
 
     logger.info(f"提交导出任务成功: {task.id}")
     return ok(data={"taskId": task.id, "status": "pending"})
@@ -86,7 +83,7 @@ async def stream_task_status(task_id: int, db: Session = Depends(get_db)):
 
     logger.info(f"开始 SSE 流式更新: {task_id}")
     return StreamingResponse(
-        stream_task_updates(task_id, db),
+        stream_task_updates(task_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

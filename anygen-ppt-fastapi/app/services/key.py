@@ -17,13 +17,15 @@ class KeyService:
     @staticmethod
     def create_keys(db: Session, count: int, max_uses: int, is_super: bool = False) -> list[Key]:
         """批量创建卡密"""
+        # 批量查询已有卡密，避免逐个查库
+        existing_keys = {k.key for k in db.query(Key.key).all()}
+
         keys = []
         for _ in range(count):
             while True:
                 key_str = KeyService.generate_key()
-                # 检查是否已存在
-                existing = db.query(Key).filter(Key.key == key_str).first()
-                if not existing:
+                if key_str not in existing_keys:
+                    existing_keys.add(key_str)
                     break
 
             key = Key(key=key_str, max_uses=max_uses, is_super=is_super, status="active")
@@ -57,10 +59,14 @@ class KeyService:
 
     @staticmethod
     def use_key(db: Session, key_str: str) -> bool:
-        """使用卡密（增加计数）"""
+        """使用卡密（增加计数，超级卡密不扣次数）"""
         key = db.query(Key).filter(Key.key == key_str).first()
         if not key:
             return False
+
+        if key.is_super:
+            logger.info(f"超级卡密 {key_str} 不扣次数")
+            return True
 
         key.used_count += 1
         if key.used_count >= key.max_uses:
@@ -90,6 +96,12 @@ class KeyService:
         """删除卡密"""
         key = db.query(Key).filter(Key.id == key_id).first()
         if key:
+            # 先将关联任务的 key_id 置空，避免 NOT NULL 约束冲突
+            from app.models.task import Task
+            db.query(Task).filter(Task.key_id == key_id).update(
+                {Task.key_id: None}, synchronize_session="fetch"
+            )
+            db.flush()
             db.delete(key)
             db.commit()
             logger.info(f"删除卡密 {key_id}")
@@ -116,6 +128,9 @@ class KeyService:
                 count += 1
             elif action == "reset_count" and value is not None:
                 key.used_count = value
+                count += 1
+            elif action == "set_max_uses" and value is not None:
+                key.max_uses = value
                 count += 1
 
         db.commit()

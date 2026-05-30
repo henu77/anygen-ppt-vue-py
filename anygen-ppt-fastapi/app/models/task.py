@@ -7,7 +7,7 @@ from .base import BaseModel
 class Task(BaseModel):
     __tablename__ = "tasks"
 
-    key_id = Column(Integer, ForeignKey("keys.id"), nullable=False)
+    key_id = Column(Integer, ForeignKey("keys.id", ondelete="SET NULL"), nullable=True)
     url = Column(String(500), nullable=False)
     email = Column(String(255), nullable=False)
     status = Column(String(50), default="pending", nullable=False)  # pending, processing, done, failed
