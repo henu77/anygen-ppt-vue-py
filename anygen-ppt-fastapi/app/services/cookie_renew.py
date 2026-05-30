@@ -106,7 +106,7 @@ async def _step1_has_login(cookies_str: str) -> tuple[bool, list[str]]:
     if xsrf:
         headers["x-xsrf-token"] = xsrf
 
-    async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
+    async with httpx.AsyncClient(timeout=20, follow_redirects=False, trust_env=False) as client:
         resp = await client.post(
             f"{PASSPORT_HOST}/newlogin/hasLogin.do",
             params={"appName": "xianyu", "fromSite": "77"},
@@ -133,7 +133,7 @@ async def _step2_silent_has_login(cookies_str: str) -> tuple[bool, list[str]]:
         "cookie": cookies_str,
     }
 
-    async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
+    async with httpx.AsyncClient(timeout=20, follow_redirects=False, trust_env=False) as client:
         resp = await client.post(
             f"{PASSPORT_HOST}/newlogin/silentHasLogin.do",
             params={
@@ -164,7 +164,7 @@ async def _step3_set_login_settings(cookies_str: str) -> list[str]:
         "cookie": cookies_str,
     }
 
-    async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
+    async with httpx.AsyncClient(timeout=20, follow_redirects=False, trust_env=False) as client:
         resp = await client.post(
             f"{PASSPORT_HOST}/ac/account/setLoginSettings.do",
             params={"fromSite": "77", "appName": "xianyu", "bizEntrance": "web"},
