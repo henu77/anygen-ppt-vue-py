@@ -143,7 +143,7 @@ class XianyuClient:
             url = f"{self.H5API_BASE}/{api}/{version}/"
 
             async with httpx.AsyncClient(
-                timeout=self.timeout, follow_redirects=True, proxies=self.proxy, trust_env=False
+                timeout=self.timeout, follow_redirects=True, proxy=self.proxy, trust_env=False
             ) as client:
                 resp = await client.post(
                     url,
