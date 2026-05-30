@@ -93,7 +93,7 @@ async def _retry_request(fn, *args, max_attempts=3, backoff_base=2, label="", **
             wait = backoff_base ** attempt
             logger.warning(f"[{label}] HTTP {status}，{wait}s 后重试")
             await asyncio.sleep(wait)
-        except (httpx.ConnectError, httpx.Timeout, httpx.ReadError) as e:
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.ReadError) as e:
             last_exc = e
             if attempt == max_attempts:
                 raise
@@ -105,7 +105,16 @@ async def _retry_request(fn, *args, max_attempts=3, backoff_base=2, label="", **
 
 # ==================== 步骤 1+2+3：浏览器获取 Cookie + 页数 + client_vars ====================
 
-async def _acquire_all(page_url: str, proxy: str = None) -> tuple[str, str, int]:
+async def _acquire_all(
+    page_url: str,
+    proxy: str = None,
+    headless: bool = True,
+    user_data_dir: str = "",
+    editor_wait_sec: int = 90,
+    stable_sec: int = 12,
+    min_blocks_per_slide: int = 4,
+    export_wait_sec: int = 480,
+) -> tuple[str, str, int]:
     """单次浏览器启动，完成 Cookie 获取 + file_system 页数推断 + client_vars 抓取。
 
     Returns: (cookie_str, client_vars_str, actual_slide_count)
@@ -114,8 +123,8 @@ async def _acquire_all(page_url: str, proxy: str = None) -> tuple[str, str, int]
 
     async with async_playwright() as p:
         context: BrowserContext = await p.chromium.launch_persistent_context(
-            user_data_dir="",  # 临时上下文
-            headless=True,
+            user_data_dir=user_data_dir,
+            headless=headless,
             proxy=proxy_cfg,
             user_agent=UNIFIED_USER_AGENT,
             viewport={"width": 1440, "height": 1000},
@@ -123,11 +132,14 @@ async def _acquire_all(page_url: str, proxy: str = None) -> tuple[str, str, int]
         )
         await context.add_init_script(STEALTH_JS)
 
+        # 清除旧 Cookie，避免残留过期 Cookie 导致 403
+        await context.clear_cookies()
+
         page = context.pages[0] if context.pages else await context.new_page()
 
         try:
             logger.info(f"[browser] 打开: {page_url}")
-            await page.goto(page_url, wait_until="load", timeout=90_000)
+            await page.goto(page_url, wait_until="load", timeout=editor_wait_sec * 1000)
             await page.wait_for_timeout(3_000)
 
             # 提取 Cookie
@@ -139,10 +151,11 @@ async def _acquire_all(page_url: str, proxy: str = None) -> tuple[str, str, int]
 
             # file_system 请求推断页数
             page_id = _extract_page_id(page_url)
+            logger.info(f"[browser] 开始推断页数，page_id={page_id}")
             expected_slide_count = await _fetch_slide_count(cookie_str, page_id, proxy)
-
+            logger.info(f"[browser] 预估页数: {expected_slide_count}")
             # 抓取 client_vars
-            min_block_count = max(10, expected_slide_count * 4)
+            min_block_count = max(10, expected_slide_count * min_blocks_per_slide)
             logger.info(f"[inject] expectedSlides={expected_slide_count} minBlocks={min_block_count}")
 
             result = await page.evaluate(
@@ -150,8 +163,8 @@ async def _acquire_all(page_url: str, proxy: str = None) -> tuple[str, str, int]
                 {
                     "minBlockCount": min_block_count,
                     "expectedSlideCount": expected_slide_count,
-                    "stableMs": 12000,
-                    "timeoutMs": 480000,
+                    "stableMs": stable_sec * 1000,
+                    "timeoutMs": export_wait_sec * 1000,
                 },
             )
 
@@ -168,8 +181,8 @@ async def _acquire_all(page_url: str, proxy: str = None) -> tuple[str, str, int]
 
 
 def _extract_page_id(page_url: str) -> str:
-    """从 URL 中提取 page_id（最后一个 - 后面的字符串）"""
-    slug = page_url.rstrip("/").split("/")[-1]
+    """从 URL 中提取 page_id（最后一个 - 后面的字符串），URL后可能会有？参数，需先去掉"""
+    slug = page_url.rstrip("/").split("/")[-1].split("?")[0]
     parts = slug.rsplit("-", 1)
     if len(parts) == 2 and len(parts[1]) > 10:
         return parts[1]
@@ -232,18 +245,27 @@ async def _fetch_slide_count(cookie_str: str, page_id: str, proxy: str = None) -
 
 # ==================== 步骤 4：创建导出任务 ====================
 
-async def _create_export_job(cookie_str: str, page_id: str, client_vars_str: str, proxy: str = None) -> tuple[str, int]:
+async def _create_export_job(cookie_str: str, page_id: str, client_vars_str: str, proxy: str = None, extra_cookie: str = "", page_url: str = "") -> tuple[str, int]:
     url = f"https://www.anygen.io/api/page/pages/{page_id}/export-jobs/"
-    cookie_dict = _parse_cookies(cookie_str)
+    # extra_cookie（系统设置中的高优先级 Cookie）与浏览器 Cookie 合并
+    # extra_cookie 的 key 优先，避免重复 key 导致服务端解析异常
+    if extra_cookie:
+        base = _parse_cookies(cookie_str)
+        override = _parse_cookies(extra_cookie)
+        base.update(override)
+        merged = "; ".join(f"{k}={v}" for k, v in base.items())
+    else:
+        merged = cookie_str
+    cookie_dict = _parse_cookies(merged)
     csrf_token = cookie_dict.get("_csrf_token", "")
 
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "Cookie": cookie_str,
+        "Cookie": merged,
         "User-Agent": UNIFIED_USER_AGENT,
         "Origin": "https://www.anygen.io",
-        "Referer": f"https://www.anygen.io/task/{page_id}",
+        "Referer": page_url or f"https://www.anygen.io/task/{page_id}",
         "x-csrftoken": csrf_token,
     }
     payload = {"export_type": 3, "extra_params": {"client_vars": client_vars_str}}
@@ -269,12 +291,23 @@ async def _create_export_job(cookie_str: str, page_id: str, client_vars_str: str
 
 # ==================== 步骤 5：轮询导出任务 ====================
 
-async def _poll_export_job(cookie_str: str, job_id: str, max_wait: int = 360, proxy: str = None) -> str:
+async def _poll_export_job(cookie_str: str, job_id: str, max_wait: int = 360, proxy: str = None, extra_cookie: str = "") -> str:
     url = f"https://www.anygen.io/api/page/export-jobs/{job_id}"
+
+    # 轮询使用与创建任务相同的合并 Cookie（与 test_expor1t.py 保持一致）
+    if extra_cookie:
+        base = _parse_cookies(cookie_str)
+        override = _parse_cookies(extra_cookie)
+        base.update(override)
+        merged = "; ".join(f"{k}={v}" for k, v in base.items())
+    else:
+        merged = cookie_str
+
     headers = {
         "Accept": "application/json",
-        "Cookie": cookie_str,
+        "Cookie": merged,
         "User-Agent": UNIFIED_USER_AGENT,
+        "Referer": f"https://www.anygen.io/",
     }
     proxy_url = proxy or None
     deadline = time.time() + max_wait
@@ -288,6 +321,14 @@ async def _poll_export_job(cookie_str: str, job_id: str, max_wait: int = 360, pr
                 resp = await client.get(url, headers=headers)
                 resp.raise_for_status()
                 body = resp.json()
+            except httpx.HTTPStatusError as e:
+                status = e.response.status_code
+                consecutive_errors += 1
+                logger.warning(f"[poll] HTTP {status} 错误，连续错误 {consecutive_errors}/3")
+                if consecutive_errors >= 3:
+                    raise RuntimeError(f"轮询连续3次 HTTP 错误: {status}")
+                await asyncio.sleep(queued_interval)
+                continue
             except (httpx.ConnectError, httpx.Timeout) as e:
                 consecutive_errors += 1
                 if consecutive_errors >= 3:
@@ -297,8 +338,11 @@ async def _poll_export_job(cookie_str: str, job_id: str, max_wait: int = 360, pr
 
             if body.get("code") not in (0, None):
                 consecutive_errors += 1
+                code = body.get("code")
+                msg = body.get("message") or body.get("msg") or ""
+                logger.warning(f"[poll] 服务端返回 code={code} msg={msg}，连续错误 {consecutive_errors}/3，body={json.dumps(body, ensure_ascii=False)[:300]}")
                 if consecutive_errors >= 3:
-                    raise RuntimeError(f"轮询连续3次服务端错误")
+                    raise RuntimeError(f"轮询连续3次服务端错误: code={code} msg={msg} body={json.dumps(body, ensure_ascii=False)[:500]}")
                 await asyncio.sleep(queued_interval)
                 continue
 
@@ -369,9 +413,11 @@ async def _download_and_validate(cookie_str: str, doc_id_or_url: str, output_pat
 
 # ==================== 主入口 ====================
 
-async def export_ppt(task_id: int, db) -> bool:
+async def export_ppt(task_id: int, db, key_str: str = None) -> bool:
     """导出 PPT 主流程（后台任务调用）"""
     from sqlalchemy.orm import Session
+    from app.services.key import KeyService
+    from app.services.settings import SettingsService
 
     try:
         task = TaskService.get_task(db, task_id)
@@ -382,22 +428,43 @@ async def export_ppt(task_id: int, db) -> bool:
         page_url = task.url
         page_id = _extract_page_id(page_url)
 
+        # 读取系统设置
+        cfg = SettingsService.get_all_settings(db)
+        use_proxy = str(cfg.get("anygen_use_proxy", "false")).lower() == "true"
+        proxy = cfg.get("anygen_proxy") if use_proxy else None
+        headless = str(cfg.get("playwright_headless", "true")).lower() == "true"
+        user_data_dir = cfg.get("playwright_user_data_dir", "") or ""
+        editor_wait_sec = int(cfg.get("editor_wait_seconds", 90))
+        stable_sec = int(cfg.get("stable_seconds", 12))
+        min_blocks_per_slide = int(cfg.get("min_blocks_per_slide", 4))
+        export_wait_sec = int(cfg.get("export_wait_seconds", 480))
+        extra_cookie = cfg.get("anygen_cookie", "") or ""
+
         # 输出路径
         output_path = os.path.join(DOWNLOAD_DIR, f"export_{task_id}.pptx")
 
         logger.info(f"[export] 开始导出任务 {task_id}: {page_url}")
 
         # 步骤 1+2+3：浏览器获取 Cookie + 页数 + client_vars
-        cookie_str, client_vars_str, slide_count = await _acquire_all(page_url)
-
-        # 步骤 4：创建导出任务
-        job_id, job_timeout = await _create_export_job(cookie_str, page_id, client_vars_str)
-
+        cookie_str, client_vars_str, slide_count = await _acquire_all(
+            page_url, proxy=proxy, headless=headless, user_data_dir=user_data_dir,
+            editor_wait_sec=editor_wait_sec, stable_sec=stable_sec,
+            min_blocks_per_slide=min_blocks_per_slide, export_wait_sec=export_wait_sec,
+        )
+        logger.info(f"[export] 获取到 cookie 和 client_vars，slide_count={slide_count}")
+        logger.info(f"[export] 创建导出任务中，use_proxy={use_proxy} proxy={proxy} headless={headless} extra_cookie={'yes' if extra_cookie else 'no'}")
+        # 步骤 4：创建导出任务（anygen_cookie 仅用于此步骤）
+        job_id, job_timeout = await _create_export_job(cookie_str, page_id, client_vars_str, proxy=proxy, extra_cookie=extra_cookie, page_url=page_url)
+        logger.info(f"[export] 导出任务创建成功，job_id={job_id} job_timeout={job_timeout}s")
         # 步骤 5：轮询
-        doc_id_or_url = await _poll_export_job(cookie_str, job_id, max_wait=max(360, job_timeout + 60))
+        doc_id_or_url = await _poll_export_job(cookie_str, job_id, max_wait=max(360, job_timeout + 60), proxy=proxy, extra_cookie=extra_cookie)
 
         # 步骤 6：下载并校验
-        await _download_and_validate(cookie_str, doc_id_or_url, output_path)
+        await _download_and_validate(cookie_str, doc_id_or_url, output_path, proxy=proxy)
+
+        # 导出成功后才消耗卡密
+        if key_str:
+            KeyService.use_key(db, key_str)
 
         # 更新任务状态
         TaskService.update_task_status(db, task_id, "done", file_path=output_path)
@@ -414,5 +481,5 @@ class ExportService:
     """导出服务（兼容路由层调用）"""
 
     @staticmethod
-    async def export_ppt(task_id: int, db) -> bool:
-        return await export_ppt(task_id, db)
+    async def export_ppt(task_id: int, db, key_str: str = None) -> bool:
+        return await export_ppt(task_id, db, key_str)
