@@ -200,7 +200,7 @@ async def _fetch_slide_count(cookie_str: str, page_id: str, proxy: str = None) -
     proxy_url = proxy or None
 
     async def _do_request():
-        async with httpx.AsyncClient(timeout=60, proxy=proxy_url, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=60, proxies=proxy_url, trust_env=False) as client:
             resp = await client.get(url, headers=headers)
             resp.raise_for_status()
             return resp.json()
@@ -272,7 +272,7 @@ async def _create_export_job(cookie_str: str, page_id: str, client_vars_str: str
     proxy_url = proxy or None
 
     async def _do_request():
-        async with httpx.AsyncClient(timeout=90, proxy=proxy_url, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=90, proxies=proxy_url, trust_env=False) as client:
             resp = await client.post(url, json=payload, headers=headers)
             resp.raise_for_status()
             return resp.json()
@@ -315,7 +315,7 @@ async def _poll_export_job(cookie_str: str, job_id: str, max_wait: int = 360, pr
     running_interval = 3.0
     consecutive_errors = 0
 
-    async with httpx.AsyncClient(timeout=30, proxy=proxy_url, trust_env=False) as client:
+    async with httpx.AsyncClient(timeout=30, proxies=proxy_url, trust_env=False) as client:
         while time.time() < deadline:
             try:
                 resp = await client.get(url, headers=headers)
@@ -388,7 +388,7 @@ async def _download_and_validate(cookie_str: str, doc_id_or_url: str, output_pat
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-    async with httpx.AsyncClient(timeout=180, proxy=proxy_url, trust_env=False, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=180, proxies=proxy_url, trust_env=False, follow_redirects=True) as client:
         async with client.stream("GET", url, headers=headers) as resp:
             resp.raise_for_status()
             total = 0

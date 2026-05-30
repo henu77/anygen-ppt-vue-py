@@ -100,7 +100,7 @@ class QRLoginManager:
         app_key = "34839810"
 
         async with httpx.AsyncClient(
-            timeout=self.timeout, follow_redirects=True, proxy=self.proxy, trust_env=False
+            timeout=self.timeout, follow_redirects=True, proxies=self.proxy, trust_env=False
         ) as client:
             logger.info(f"是否使用代理{self.proxy}")
             # GET: 从 Set-Cookie 中获取 m_h5_tk
@@ -141,7 +141,7 @@ class QRLoginManager:
         }
 
         async with httpx.AsyncClient(
-            follow_redirects=True, timeout=self.timeout, proxy=self.proxy, trust_env=False
+            follow_redirects=True, timeout=self.timeout, proxies=self.proxy, trust_env=False
         ) as client:
             resp = await client.get(
                 f"{PASSPORT_HOST}/mini_login.htm",
